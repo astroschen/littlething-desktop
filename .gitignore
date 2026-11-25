@@ -1,0 +1,103 @@
+# 依赖
+node_modules/
+.pnpm-store/
+
+# ⚠️ 例外：resources/hook/node_modules 是**运行时必需**的，不能忽略。
+#
+# 这里的 koffi 不是普通的开发依赖 —— 它是「全局键盘钩子」和「保密模式」的
+# FFI 运行时，且需要按平台取预编译二进制（@koromix/koffi-win32-x64），
+# 直接 npm i 在跨平台场景下容易装错版本或漏掉 .node 文件。
+# 所以这里把整个目录 vendor 进仓库，随源码一起分发。
+#
+# gitignore 的规则是「最后一条匹配者生效」，所以下面必须写反选规则。
+!resources/hook/node_modules/
+!resources/hook/node_modules/**
+
+# ⚠️ 但 koffi 只需要运行时那几份 JS —— 它的 C++ 源码、CMake 配置、
+# vendor 头文件、doc 文档加起来有 2 MB 多，对使用者毫无用处。
+# 所以这里再排除掉，只保留运行时必需的那部分。
+#
+# ⚠️ 这里必须小心：koffi 的运行时入口链是
+#
+#     koffi/index.cjs  →  src/koffi/index.cjs  →  src/koffi/src/static.cjs
+#
+# 中间那一环（src/koffi/index.cjs）是最容易被误伤的 —— 它是 *.cjs，
+# 会被下面那条通配规则挡掉，而它恰恰是**必需**的：入口 index.cjs 就是
+# `module.exports = require("./src/koffi/index.cjs")`。
+#
+# 一旦它没进仓库，clone 下来的人一 require koffi 就直接
+# "Cannot find module './src/koffi/index.cjs'"，全局键盘钩子和保密模式
+# 全部起不来 —— 而且这个错只在运行时才暴露，install 阶段完全看不出来。
+#
+# 所以下面用反选规则把这几个必需文件救回来。
+resources/hook/node_modules/koffi/doc/
+resources/hook/node_modules/koffi/lib/
+resources/hook/node_modules/koffi/src/koffi/src/*.cc
+resources/hook/node_modules/koffi/src/koffi/src/*.hh
+resources/hook/node_modules/koffi/src/koffi/src/*.inc
+resources/hook/node_modules/koffi/src/koffi/src/abi/
+resources/hook/node_modules/koffi/src/koffi/src/interp.hh
+resources/hook/node_modules/koffi/src/koffi/CMakeLists.txt
+resources/hook/node_modules/koffi/src/koffi/*.cjs
+resources/hook/node_modules/koffi/src/koffi/*.js
+resources/hook/node_modules/koffi/vendor/
+resources/hook/node_modules/koffi/cnoke.cjs
+resources/hook/node_modules/koffi/index.d.ts
+
+# ...再把运行时必需的那几个救回来（见上面的说明）。
+!resources/hook/node_modules/koffi/src/koffi/index.cjs
+!resources/hook/node_modules/koffi/src/koffi/index.js
+!resources/hook/node_modules/koffi/src/koffi/indirect.cjs
+!resources/hook/node_modules/koffi/src/koffi/indirect.js
+!resources/hook/node_modules/koffi/src/koffi/src/static.cjs
+!resources/hook/node_modules/koffi/src/koffi/src/static.js
+!resources/hook/node_modules/koffi/src/koffi/src/trampolines.cjs
+!resources/hook/node_modules/koffi/src/koffi/src/trampolines.js
+!resources/hook/node_modules/koffi/src/koffi/src/uv.def
+
+# 构建产物
+dist/
+out/
+release/
+*.blockmap
+*.exe
+*.dmg
+*.AppImage
+*.deb
+*.rpm
+*.msi
+
+# Electron 缓存
+.electron/
+electron-builder-cache/
+
+# 运行时配置（用户本地生成）
+pet-config.json
+
+# 调试产物
+*.log
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 编辑器 / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 系统
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# 临时文件
+_tmp/
+tmp/
+*.tmp
+*.bak
+
+# 设计文档
+docs

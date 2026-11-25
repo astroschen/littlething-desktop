@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小叽 · 设置</title>
+<style>
+  :root { --ink: #17171b; --soft: #4b4636; --sun: #ffd978; --key: #fffdf4; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 20px; background: var(--key); color: var(--ink);
+    font: 14px/1.6 system-ui, -apple-system, "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 19px; margin: 0 0 4px; }
+  .sub { color: var(--soft); margin: 0 0 18px; font-size: 13px; }
+  /* 头部：logo + 标题 */
+  .head { display: flex; align-items: center; gap: 13px; margin-bottom: 14px; }
+  .head .logo { width: 52px; height: 52px; flex: none; image-rendering: auto; }
+  .head .txt h1 { margin: 0 0 2px; }
+  .head .txt .sub { margin: 0; }
+  .group { border-top: 1px solid rgba(23,23,27,.15); padding: 12px 0; }
+  .group h2 { font-size: 14px; margin: 0 0 8px; }
+  label.row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 3px 0; }
+  label.row span { flex: 1; }
+  input[type="checkbox"] { width: 17px; height: 17px; accent-color: var(--ink); }
+  select { font: inherit; padding: 5px 8px; border: 1.5px solid var(--ink); border-radius: 8px; background: #fff; }
+  input[type="range"] { width: 150px; accent-color: var(--ink); }
+  .val { font-variant-numeric: tabular-nums; min-width: 42px; text-align: right; color: var(--soft); }
+  .actions { display: flex; gap: 10px; margin-top: 18px; }
+  button { font: 600 14px system-ui, sans-serif; padding: 8px 16px; border: 2px solid var(--ink);
+    border-radius: 10px; background: #fff; color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--ink); color: var(--key); }
+  button:active { transform: translateY(1px); }
+  button:disabled { opacity: .45; cursor: default; }
+  /* 「编辑皮肤…」按钮跟旁边的下拉框对齐，所以字号小一圈、行高也收一点 */
+  #openSkinEditor { font-size: 13px; padding: 5px 12px; }
+  /* 用户自己的皮肤单独列一排，免得和内置的混在一起分不清。 */
+  .myskins { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .myskins button { font-size: 12px; padding: 4px 10px; border-width: 1.5px;
+    display: inline-flex; align-items: center; gap: 6px; }
+  .myskins .sw { width: 14px; height: 14px; border-radius: 4px; border: 1.5px solid var(--ink);
+    display: inline-block; flex: none; }
+  .myskins button[aria-pressed="true"] { background: var(--ink); color: var(--key); }
+  .myskins button[aria-pressed="true"] .sw { border-color: var(--key); }
+  .tip { font-size: 12px; color: var(--soft); margin-top: 12px; }
+</style>
+</head>
+<body>
+  <div class="head">
+    <img class="logo" src="assets/icons/logo.png" alt="">
+    <div class="txt">
+      <h1 data-i18n="title">小叽 · 桌宠设置</h1>
+      <p class="sub" data-i18n="subtitle">设置保存在本机，重启后依然生效。</p>
+    </div>
+  </div>
+
+  <div class="group">
+    <h2 data-i18n="appearance">外观</h2>
+    <label class="row"><span data-i18n="language">界面语言</span>
+      <select id="language">
+        <option value="zh">简体中文</option>
+        <option value="en">English</option>
+      </select>
+    </label>
+    <label class="row"><span data-i18n="coat">毛色</span>
+      <!-- 皮肤列表由 assets/skins.js 的 COATS 生成，不再硬编码在这里。
+           设置页不再维护第二份皮肤清单 —— 单一数据源。
+           用户自己的皮肤也会并进这个下拉框（见 settings.js）。 -->
+      <select id="coat"></select>
+    </label>
+    <label class="row"><span data-i18n="customSkin">自定义皮肤</span>
+      <button id="openSkinEditor" type="button" data-i18n="customSkinEdit">✎ 编辑皮肤…</button>
+    </label>
+    <!-- 用户自己做的皮肤。空的时候这一行不出现。 -->
+    <div id="mySkinsRow" hidden>
+      <div class="myskins" id="mySkins"></div>
+    </div>
+    <label class="row"><span data-i18n="showKeyboard">显示键盘</span><input id="showKeyboard" type="checkbox"></label>
+    <label class="row"><span data-i18n="showMouse">显示鼠标</span><input id="showMouse" type="checkbox"></label>
+    <label class="row"><span data-i18n="leftMouse">左手鼠标布局</span><input id="leftMouse" type="checkbox"></label>
+    <label class="row"><span data-i18n="autoDemo">演示模式（自动打字）</span><input id="autoDemo" type="checkbox"></label>
+    <label class="row"><span data-i18n="globalKeys">全局键盘跟随</span><input id="globalKeys" type="checkbox"></label>
+    <label class="row"><span data-i18n="globalMouse">全局鼠标跟随</span><input id="globalMouse" type="checkbox"></label>
+  </div>
+
+  <div class="group">
+    <h2 data-i18n="behavior">行为</h2>
+    <label class="row"><span data-i18n="sleepMinutes">入睡等待（分钟）</span>
+      <input id="sleepMinutes" type="range" min="1" max="10" step="0.5"><span class="val" id="sleepMinutesVal"></span>
+    </label>
+    <label class="row"><span data-i18n="scale">窗口大小</span>
+      <input id="scale" type="range" min="0.6" max="1.6" step="0.05"><span class="val" id="scaleVal"></span>
+    </label>
+    <label class="row"><span data-i18n="opacity">不透明度</span>
+      <input id="opacity" type="range" min="0.4" max="1" step="0.05"><span class="val" id="opacityVal"></span>
+    </label>
+    <label class="row"><span data-i18n="alwaysOnTop">永远置顶</span><input id="alwaysOnTop" type="checkbox"></label>
+    <label class="row"><span data-i18n="autoLaunch">开机自动启动</span><input id="autoLaunch" type="checkbox"></label>
+    <label class="row"><span data-i18n="allowDrag">允许拖动猫咪</span><input id="allowDrag" type="checkbox"></label>
+    <label class="row"><span data-i18n="secretMode">保密模式（输密码时扭头不看）</span><input id="secretMode" type="checkbox"></label>
+    <label class="row"><span data-i18n="debug">启用诊断日志</span><input id="debug" type="checkbox"></label>
+  </div>
+
+  <div class="actions">
+    <button id="save" class="primary" data-i18n="save">保存</button>
+    <button id="cancel" data-i18n="cancel">取消</button>
+    <button id="resetPosition" data-i18n="resetPosition">重置位置</button>
+  </div>
+  <p class="tip" data-i18n="tip">提示：按住猫咪本体拖动即可移动位置（可在下方「允许拖动猫咪」中关闭）；托盘图标右键可显示/隐藏或退出。按 Ctrl+Alt+S 随时打开本窗口。全局输入跟随只读取键位与鼠标按键/移动用于驱动动画，不记录输入内容，可随时关闭。保密模式只向系统询问「当前焦点是不是密码框」，绝不读取密码内容，保密期间小键盘也不会显示任何字符。</p>
+
+  <script src="./assets/skins.js"></script>
+  <script src="./assets/skin-store.js"></script>
+  <script src="./settings.js"></script>
+</body>
+</html>

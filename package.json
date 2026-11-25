@@ -1,0 +1,123 @@
+{
+  "name": "littlething-cat-desktop",
+  "version": "1.0.0",
+  "description": "小叽 3D 小猫桌面版 - Electron 封装",
+  "author": "LittleThing Local",
+  "main": "main.js",
+  "scripts": {
+    "postinstall": "node scripts/ensure-electron.js",
+    "start": "electron .",
+    "build:win": "node scripts/build.js --win",
+    "build:mac": "node scripts/build.js --mac",
+    "build:linux": "node scripts/build.js --linux"
+  },
+  "build": {
+    "appId": "com.workbuddy.littlething.cat",
+    "productName": "小叽",
+    "npmRebuild": false,
+    "electronLanguages": [
+      "zh-CN",
+      "zh-TW",
+      "en-US",
+      "en-GB",
+      "ja",
+      "ko",
+      "fr",
+      "de",
+      "es",
+      "es-419",
+      "ru",
+      "pt-BR",
+      "it",
+      "ar",
+      "hi"
+    ],
+    "files": [
+      "main.js",
+      "native-hook.js",
+      "password-probe.js",
+      "preload.js",
+      "pet.html",
+      "pet.js",
+      "settings.html",
+      "settings.js",
+      "skin-editor.html",
+      "editor.js",
+      "index.html",
+      "app.js",
+      "assets/**/*",
+      "!keyboard-hook.js",
+      "!node_modules/@mukea/**",
+      "!resources/**"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/hook/node_modules/koffi",
+        "to": "hook/node_modules/koffi",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/hook/node_modules/@koromix/koffi-win32-x64",
+        "to": "hook/node_modules/@koromix/koffi-win32-x64",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon/app-icon.ico"
+    },
+    "mac": {
+      "category": "public.app-category.entertainment",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
+      ]
+    },
+    "linux": {
+      "category": "Utility",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "icon": "build/icon/app-icon.ico"
+  },
+  "devDependencies": {
+    "electron": "latest",
+    "electron-builder": "latest"
+  },
+  "dependencies": {
+    "@mukea/uiohook-napi": "^2.0.1"
+  }
+}

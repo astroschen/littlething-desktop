@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小叽 · 自定义皮肤</title>
+<link rel="stylesheet" href="./assets/skin-editor.css">
+<style>
+  /* 页面外壳。编辑器本身的三栏布局全在 skin-editor.css 里，
+     这里只负责把它放到一个像样的窗口里。
+
+     网页版的编辑器是一个 <dialog>，外面套着标题（「自定义皮肤」+
+     副标题）和一圈描边。桌面版是独立窗口，没有 dialog 可用，但外壳
+     必须长得一样 —— 否则两端摆在一起会像两个不同的程序。 */
+  :root {
+    --ink: #17171b;
+    --ink-soft: #4b4636;
+    --key: #fffdf4;
+    --display: ui-rounded, "SF Pro Rounded", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    padding: 16px 18px 20px;
+    background: #fffdf4;
+    color: var(--ink);
+    font: 14px/1.6 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    overflow: auto;
+  }
+
+  /* 和网页版 dialog 的 .skin-dialog 一样：两像素描边、圆角、硬阴影。 */
+  .skin-shell {
+    background: var(--key);
+    border: 2px solid var(--ink);
+    border-radius: 18px;
+    box-shadow: 0 10px 0 rgba(23,23,27,.2);
+    padding: 16px 18px 18px;
+  }
+  .skin-dialog-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 12px;
+  }
+  .skin-dialog-head h2 { font: 700 18px/1.3 var(--display); margin: 0; }
+  .skin-dialog-head p { margin: 0; font-size: 13px; color: var(--ink-soft); }
+
+  #skin-editor-host { min-height: 100%; }
+</style>
+</head>
+<body>
+  <div class="skin-shell">
+    <div class="skin-dialog-head">
+      <h2>自定义皮肤</h2>
+      <p>改配色、拉体型、用画笔涂花纹 —— 右边看着画，左边立刻就变。</p>
+    </div>
+    <div id="skin-editor-host"></div>
+  </div>
+
+  <!-- 加载顺序有讲究：
+       skins.js      —— 皮肤数据（配色、花纹、比例表），编辑器和存储层都要用
+       skin-store.js —— 皮肤的存取（这里是磁盘文件，网页版是 localStorage）
+       skin-editor.js—— 编辑器面板本身
+       cat.js        —— 3D 小猫（编辑器里的预览猫就是它造的）
+       editor.js     —— 把它们接到一起
+  -->
+  <script src="./assets/three.min.js"></script>
+  <script src="./assets/skins.js"></script>
+  <script src="./assets/skin-store.js"></script>
+  <script src="./assets/skin-editor.js"></script>
+  <script src="./assets/cat.js"></script>
+  <script src="./editor.js"></script>
+</body>
+</html>

@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小叽</title>
+<style>
+  :root {
+    --sun: #ffd978;
+    --sun-deep: #f9bf5a;
+    --ink: #17171b;
+    --ink-soft: #4b4636;
+    --key: #fffdf4;
+    --press: #ef7d2d;
+    --display: ui-rounded, "SF Pro Rounded", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    --body: system-ui, -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html { background: var(--sun); }
+  body {
+    margin: 0;
+    color: var(--ink);
+    font: 16px/1.65 var(--body);
+    background: linear-gradient(180deg, var(--sun) 0, var(--sun) 520px, var(--sun-deep) 100%);
+    min-height: 100vh;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 24px 20px 48px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+  /* 品牌区：logo + 标题并排 */
+  .brand { display: flex; align-items: center; gap: 13px; min-width: 0; }
+  .brand .logo { width: 48px; height: 48px; flex: none; }
+  h1 { font: 700 clamp(26px, 4vw, 40px)/1.15 var(--display); margin: 0; }
+  .tag { font: 600 13px/1 var(--body); color: var(--ink-soft); background: rgba(23,23,27,.08); padding: 8px 12px; border-radius: 999px; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(280px, .65fr); gap: 22px; align-items: start; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+
+  .stage-card {
+    position: relative;
+    background: var(--sun);
+    border: 2px solid var(--ink);
+    border-radius: 22px;
+    box-shadow: 0 6px 0 rgba(23,23,27,.18);
+    overflow: hidden;
+  }
+  #stage {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 400 / 340;
+    touch-action: none;
+    cursor: grab;
+    background: transparent;
+  }
+  #stage:active { cursor: grabbing; }
+  #stage canvas { display: block; width: 100%; height: 100%; }
+  .try {
+    position: absolute;
+    left: 8px;
+    top: 6px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--key);
+    border: 2px solid var(--ink);
+    border-radius: 10px;
+    padding: 4px 10px;
+    font: 600 14px var(--display);
+    box-shadow: 0 3px 0 var(--ink);
+    pointer-events: none;
+    z-index: 5;
+  }
+  .try kbd { font: inherit; background: var(--ink); color: var(--key); border-radius: 5px; padding: 0 6px; }
+  .chip {
+    position: absolute;
+    transform: translate(-50%, -100%);
+    padding: 0 6px;
+    border-radius: 6px;
+    background: var(--key);
+    border: 1.5px solid var(--ink);
+    color: var(--ink);
+    font: 700 13px var(--display);
+    pointer-events: none;
+    transition: opacity .2s;
+    z-index: 4;
+  }
+  .zzz { position: absolute; pointer-events: none; display: none; font-family: var(--display); font-weight: 700; color: var(--ink); z-index: 3; }
+  .zzz span { position: absolute; left: 0; top: 0; opacity: 0; font-size: 1em; line-height: 1; transform-origin: 0 100%; animation: zfloat 3.3s linear infinite; }
+  .zzz span:nth-child(2) { animation-delay: 1.1s; }
+  .zzz span:nth-child(3) { animation-delay: 2.2s; }
+  @keyframes zfloat {
+    0% { opacity: 0; transform: translate(0, 0) scale(.28); }
+    12% { opacity: 1; }
+    70% { opacity: 1; }
+    100% { opacity: 0; transform: translate(1.4em, -2.6em) scale(1); }
+  }
+  @media (prefers-reduced-motion: reduce) { .zzz span { animation: none; opacity: 1; } }
+
+  .panel { background: var(--key); border: 2px solid var(--ink); border-radius: 18px; padding: 16px; box-shadow: 0 5px 0 rgba(23,23,27,.16); }
+  .panel h2 { font: 700 16px/1.3 var(--display); margin: 0 0 10px; }
+  .panel + .panel { margin-top: 14px; }
+  .status { display: grid; grid-template-columns: 4.5em 1fr; gap: 4px 10px; font-size: 14px; }
+  .status b { color: var(--ink-soft); font-weight: 600; }
+  #state { font-weight: 700; color: var(--press); }
+  #keys { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; }
+  button {
+    font: 600 14px var(--body);
+    color: var(--ink);
+    background: #fff;
+    border: 2px solid var(--ink);
+    border-radius: 10px;
+    padding: 6px 11px;
+    cursor: pointer;
+    box-shadow: 0 3px 0 rgba(23,23,27,.18);
+  }
+  button:hover { background: #fff8dc; }
+  button:active { transform: translateY(2px); box-shadow: 0 1px 0 rgba(23,23,27,.18); }
+  button[aria-pressed="true"] { background: var(--ink); color: var(--key); box-shadow: none; }
+  button:focus-visible { outline: 3px solid var(--press); outline-offset: 2px; }
+  label.toggle { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 14px; cursor: pointer; }
+  label.toggle input { accent-color: var(--ink); width: 17px; height: 17px; }
+  .sw { display: inline-block; width: 11px; height: 11px; border-radius: 50%; border: 1px solid var(--ink); margin-right: 5px; vertical-align: -1px; }
+  .hint { font-size: 13px; color: var(--ink-soft); margin: 10px 0 0; }
+  .legend { margin-top: 16px; font-size: 14px; color: var(--ink-soft); }
+  .legend strong { color: var(--ink); }
+  .error { display: none; padding: 12px; background: #ffe1d5; border: 2px solid #b5432a; border-radius: 12px; margin-bottom: 14px; }
+  [hidden] { display: none !important; }
+
+  /* ---------- 用户自己的皮肤列表 ---------- */
+  .skin-my-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .skin-my-list .row { margin: 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <!-- 桌面版的图标在 assets/icons/ 下（网页版是 assets/logo.png 扁平结构），
+           路径和 main.js 的 resolveIcon() 保持一致。 -->
+      <img class="logo" src="./assets/icons/logo.png" alt="小叽 logo">
+      <h1>小叽</h1>
+    </div>
+    <span class="tag">离线运行 · 键盘 / 鼠标 / 摸头 / 睡觉</span>
+  </header>
+
+  <div id="error" class="error">
+    这个浏览器没有可用的 WebGL，3D 小猫无法启动。请在支持 WebGL 的桌面浏览器中打开本页。
+  </div>
+
+  <div class="grid">
+    <div class="stage-card">
+      <div id="stage" aria-label="小叽的现场演示">
+        <div id="try" class="try">敲键盘试试 <kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></div>
+      </div>
+      <p class="legend">
+        <strong>玩法：</strong>按任意键 → 小猫用对应的爪子敲击发光键；移动 / 点击鼠标 → 它看光标、按鼠标；
+        <strong>按住它的头</strong> → 眯眼蹭手；静置约 2 分钟 → 闭眼、尾巴放下、冒 Z。
+      </p>
+    </div>
+
+    <aside>
+      <div class="panel">
+        <h2>当前状态</h2>
+        <div class="status">
+          <b>状态</b><span id="state">载入中…</span>
+          <b>按下的键</b><span id="keys">—</span>
+          <b>输入</b><span id="input-mode">自动演示</span>
+        </div>
+      </div>
+
+      <div class="panel">
+        <h2>毛色</h2>
+        <!-- 皮肤按钮由 assets/skins.js 的 COATS 生成（见 app.js）。
+             这里不再手写第二份清单。 -->
+        <div class="row" id="coats"></div>
+        <div class="row" style="margin-top:12px">
+          <button type="button" id="open-skin-editor">✎ 自定义皮肤</button>
+        </div>
+        <div id="my-skins" class="skin-my-list"></div>
+      </div>
+
+      <div class="panel">
+        <h2>桌面与操作</h2>
+        <div class="row">
+          <label class="toggle"><input id="show-keyboard" type="checkbox" checked> 显示键盘</label>
+          <label class="toggle"><input id="show-mouse" type="checkbox" checked> 显示鼠标</label>
+          <label class="toggle"><input id="left-handed" type="checkbox"> 左手鼠标</label>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <button type="button" id="sleep-now">立刻睡觉</button>
+          <button type="button" id="wake-up">唤醒</button>
+          <button type="button" id="replay">重播自动演示</button>
+        </div>
+        <p class="hint">按键只用于点亮画面，不会保存或发送。</p>
+      </div>
+
+      <div class="panel">
+        <h2>保密模式</h2>
+        <p class="hint" style="margin:0 0 10px">在密码框里打字：小猫会扭头看向<b>反方向</b>装作没看见；停手几秒它会<b>偷偷</b>瞥一眼密码框；你一继续打，它马上又转回去。</p>
+        <label class="toggle" style="display:block;margin-bottom:8px"><input id="secret-on" type="checkbox" checked> 启用保密模式</label>
+        <label class="row" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:4px 0"><span style="font-weight:600;font-size:14px">密码框位置</span>
+          <select id="secret-dir" style="font:inherit;padding:5px 8px;border:2px solid var(--ink);border-radius:8px;background:#fff">
+            <option value="1">在猫的右边</option>
+            <option value="-1">在猫的左边</option>
+          </select>
+        </label>
+        <label class="row" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:4px 0"><span style="font-weight:600;font-size:14px">试试看</span>
+          <input type="password" placeholder="在这里输密码" autocomplete="off" style="font:inherit;padding:5px 8px;border:2px solid var(--ink);border-radius:8px;background:#fff;width:150px">
+        </label>
+        <p class="hint">当前表演：<b id="secret-state">未进入</b></p>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<!-- 桌面版的编辑器是一个独立窗口（skin-editor.html），
+     由主进程按需打开。这里曾经还留着一份网页版的 <dialog> 弹窗外壳
+     和它的 #skin-editor-host —— 但桌面版的 app.js 从不调用
+     createSkinEditor，那套 DOM 永远不会被填满，是从网页版整段拷来的
+     死代码。留着它只会让人误以为这个窗口里也有编辑器，
+     所以删掉；编辑器自己的标题外壳在 skin-editor.html 里。 -->
+
+<script src="./assets/three.min.js"></script>
+<script src="./assets/skins.js"></script>
+<script src="./assets/skin-store.js"></script>
+<script src="./assets/cat.js"></script>
+<script src="./app.js"></script>
+</body>
+</html>
