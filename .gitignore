@@ -66,6 +66,7 @@ release/
 *.deb
 *.rpm
 *.msi
+.omc
 
 # Electron 缓存
 .electron/
