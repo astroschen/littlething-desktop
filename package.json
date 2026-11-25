@@ -111,7 +111,14 @@
         }
       ]
     },
-    "icon": "build/icon/app-icon.ico"
+    "icon": "build/icon/app-icon.ico",
+    "artifactName": "LittleThing-${version}-${arch}.${ext}",
+    "nsis": {
+      "artifactName": "LittleThing-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "LittleThing-${version}.${ext}"
+    }
   },
   "devDependencies": {
     "electron": "latest",

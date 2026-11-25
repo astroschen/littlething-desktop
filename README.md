@@ -96,8 +96,13 @@ pnpm start
 
 从 [Releases](https://github.com/astroschen/littlething-desktop/releases) 下载：
 
-- `小叽 Setup x.x.x.exe` —— 安装版，带开机自启和开始菜单
-- `小叽 x.x.x.exe` —— 便携版，双击即用，绿色无残留
+- `LittleThing-Setup-x.x.x.exe` —— 安装版，带开机自启和开始菜单
+- `LittleThing-x.x.x.exe` —— 便携版，双击即用，绿色无残留
+
+> 下载文件名用的是英文 `LittleThing` 而不是「小叽」：GitHub 的 Release 附件名
+> 会把非 ASCII 字符和空格剥掉，中文名上传后会被改成 `Setup.x.x.x.exe` 这种
+> 莫名其妙的字符串。构建配置里的 `artifactName` 已经固定成英文名，产物名和
+> 上传后的名字保持一致。
 
 ## 构建
 
