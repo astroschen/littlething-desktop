@@ -18,7 +18,14 @@ const clean = spawnSync(process.execPath, [path.join(__dirname, 'clean-dist.js')
   shell: false
 });
 
-const result = spawnSync(builder, [target], {
+// --publish never：electron-builder 看到当前是个 git tag 就会「隐式发布」，
+// 直接去调 GitHub API 创建 Release —— 没有 token 就报
+// "GitHub Personal Access Token is not set"，而且是在产物**已经打好之后**才炸，
+// 排查起来很绕（macOS 的 dmg 其实早就构建完了）。
+//
+// 发布由 CI 的 softprops/action-gh-release 负责，构建这一步只管产出文件，
+// 所以这里明确关掉隐式发布。
+const result = spawnSync(builder, [target, '--publish', 'never'], {
   cwd: path.join(__dirname, '..'),
   stdio: 'inherit',
   shell: process.platform === 'win32'

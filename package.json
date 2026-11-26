@@ -2,7 +2,14 @@
   "name": "littlething-cat-desktop",
   "version": "1.0.1",
   "description": "小叽 3D 小猫桌面版 - Electron 封装",
-  "author": "LittleThing Local",
+  "author": {
+    "name": "LittleThing Local",
+    "email": "chenzhenyu@gdcattsoft.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/astroschen/littlething-desktop.git"
+  },
   "main": "main.js",
   "scripts": {
     "postinstall": "node scripts/ensure-electron.js",
@@ -106,6 +113,7 @@
     },
     "linux": {
       "category": "Utility",
+      "maintainer": "LittleThing Local <chenzhenyu@gdcattsoft.com>",
       "target": [
         {
           "target": "AppImage",
@@ -128,6 +136,12 @@
     },
     "portable": {
       "artifactName": "LittleThing-${version}.${ext}"
+    },
+    "appImage": {
+      "artifactName": "LittleThing-${version}-x64.${ext}"
+    },
+    "deb": {
+      "artifactName": "LittleThing-${version}-x64.${ext}"
     }
   },
   "devDependencies": {
