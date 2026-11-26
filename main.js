@@ -1,5 +1,5 @@
 const {
-  app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, globalShortcut, screen, shell
+  app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, globalShortcut, screen, shell, powerMonitor
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
@@ -642,7 +642,11 @@ let legacyLoginItemCleaned = false;
 //
 // 删掉的键会由下面 setLoginItemSettings() 重新写回来，所以删了不影响自启。
 function cleanLegacyLoginItems() {
-  const RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
+  // ⚠️⚠️ **PowerShell 的注册表路径用冒号，reg.exe 用反斜杠**！
+  //   `HKCU\Software\...` 在 PowerShell 里是**无效路径** ——
+  //   Test-Path 返回 false，什么都读不到（而且**不报错**，静默失败）。
+  //   必须写成 `HKCU:\Software\...`。
+  const PS_RUN_KEY = 'HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
   const currentName = 'electron.app.' + app.getName();
   // 当前程序的可执行路径。便携版要用原始 exe 那个，不能用临时目录里的副本。
   const selfExe = launchExecutable();
@@ -651,33 +655,50 @@ function cleanLegacyLoginItems() {
   const normPath = p => String(p || '').trim().replace(/^"|"$/g, '').toLowerCase();
   const selfKey = normPath(selfExe);
   return new Promise(resolve => {
-    // 先把 Run 项下所有值列出来。
-    execFile('reg', ['query', RUN_KEY], { windowsHide: true }, (err, stdout) => {
-      if (err || !stdout) { resolve(); return; }
-      // reg query 的输出形如：  HKEY_...\Run
-      //                         <名称>    REG_SZ    <值>
-      // 值名与 REG_ 类型之间是**一个或多个**制表符/空格（不是固定两个），
-      // 所以分隔符写成 `[ \t]+`，值名段用非贪婪匹配。
-      const stale = [];
-      for (const line of String(stdout).split(/\r?\n/)) {
-        const m = line.match(/^[ \t]{4}(\S.*?)[ \t]+(REG_[A-Z_]+)[ \t]+(.*)$/);
-        if (!m) continue;
-        const name = m[1].trim();
-        if (!/^electron\.app\./.test(name)) continue;
-        const value = String(m[3] || '').trim();
-        // 指向当前程序自己的，保留。
-        if (name === currentName) continue;
-        if (selfKey && normPath(value) === selfKey) continue;
-        stale.push(name);
-      }
-      if (!stale.length) { resolve(); return; }
-      let pending = stale.length;
-      const done = () => { if (--pending <= 0) resolve(); };
-      for (const name of stale) {
-        execFile('reg', ['delete', RUN_KEY, '/v', name, '/f'],
-          { windowsHide: true }, () => { done(); });
-      }
-    });
+    // ⚠️⚠️ **必须用 PowerShell，不能用 `reg.exe`**。
+    //   `reg.exe` 在受保护环境的 Program Blacklist 里 —— 程序一启动就被拦，
+    //   在某些沙箱/企业环境下甚至会弹安全告警。
+    //   （跟 readTrayPromotedState() 一样的理由。）
+    //
+    //   一次 PowerShell 调用把 Run 项下的值全列出来，输出成
+    //   「名称<TAB>值」一行一个，解析起来比 reg query 的表格稳。
+    const ps = `$k='${PS_RUN_KEY}';`
+      + `if(Test-Path $k){`
+      + `$p=Get-ItemProperty -Path $k;`
+      + `$p.PSObject.Properties | Where-Object { $_.Name -notlike 'PS*' } | `
+      // ⚠️ 这里的 "`t" 是 PowerShell 的制表符 —— 但它在 JS 模板字符串里，
+      //   反引号会**提前结束字符串**！必须写成 \` 转义。
+      + `ForEach-Object { Write-Output ($_.Name + "\`t" + $_.Value) } }`;
+    execFile('powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', ps],
+      { timeout: 8000, windowsHide: true },
+      (err, stdout) => {
+        if (err || !stdout) { resolve(); return; }
+        const stale = [];
+        for (const line of String(stdout).split(/\r?\n/)) {
+          const t = line.indexOf('\t');
+          if (t <= 0) continue;
+          const name = line.slice(0, t).trim();
+          const value = line.slice(t + 1).trim();
+          if (!/^electron\.app\./.test(name)) continue;
+          // 指向当前程序自己的，保留。
+          if (name === currentName) continue;
+          if (selfKey && normPath(value) === selfKey) continue;
+          stale.push(name);
+        }
+        if (!stale.length) { resolve(); return; }
+        let pending = stale.length;
+        const done = () => { if (--pending <= 0) resolve(); };
+        for (const name of stale) {
+          // ⚠️ 键名要转义 —— 里面有反斜杠和点号。
+          const safe = name.replace(/'/g, "''");
+          const delPs = `Remove-ItemProperty -Path '${PS_RUN_KEY}' -Name '${safe}' -ErrorAction SilentlyContinue`;
+          execFile('powershell.exe',
+            ['-NoProfile', '-NonInteractive', '-Command', delPs],
+            { timeout: 8000, windowsHide: true },
+            () => { done(); });
+        }
+      });
   });
 }
 
@@ -1041,6 +1062,7 @@ function createTray() {
   //   同一份菜单项、同一套主题。
   tray.on('right-click', () => {
     const p = screen.getCursorScreenPoint();
+    debugLog('tray right-click at ' + p.x + ',' + p.y);
     showContextMenu(p.x, p.y);
   });
 }
@@ -1170,6 +1192,9 @@ function startTrayPoll() {
 // 窗口内弹出要用鼠标的屏幕坐标，否则菜单会跑到窗口左上角。
 function popupPetContextMenu(screenX, screenY) {
   if (!petWindow || petWindow.isDestroyed()) return;
+  // ⚠️ 这条路径之前**完全没有日志** —— 排查「右键没反应」时
+  //   根本看不出事件有没有到主进程。现在记一笔。
+  debugLog('popupPetContextMenu at ' + screenX + ',' + screenY);
   showContextMenu(screenX, screenY);
 }
 
@@ -1215,14 +1240,19 @@ function runContextMenuAction(action) {
 //   用户正在密码框里打字就会被打断 —— 光标跳到别处去了。
 //   保密模式的意义就打了折扣。
 function closeContextMenu() {
+  clearMenuTimer();
+  menuState.settled = false;
+  menuState.ready = false;
   if (!contextMenuWindow || contextMenuWindow.isDestroyed()) {
     contextMenuWindow = null;
+    menuState.win = null;
     return;
   }
   // 记下菜单打开前谁有焦点。
   const prev = BrowserWindow.getFocusedWindow();
   const win = contextMenuWindow;
   contextMenuWindow = null;
+  menuState.win = null;
   win.destroy();
   // 焦点还给原来那个窗口 —— 但**不能 focus 桌宠**：
   // 桌宠抢焦点会让用户在密码框里没法打字。
@@ -1232,9 +1262,96 @@ function closeContextMenu() {
   }
 }
 
-function showContextMenu(screenX, screenY) {
+// 右键菜单的弹窗状态。
+//
+// ⚠️ 为什么需要这一整套状态机：
+//   用户报过「右键菜单弹不出来」，而且两条路径（猫右键 / 托盘右键）一起失效。
+//   排查发现 showContextMenu() 过去**完全依赖 'ready-to-show'** ——
+//   那是个一次性事件，且要求渲染进程真的产出了一帧。
+//
+//   电脑睡眠 / 锁屏之后，Chromium 的渲染进程可能卡在异常状态
+//   （网络服务重启、合成器没被唤醒），于是：
+//     · 'ready-to-show' 永远不触发
+//     · 窗口永远是 show:false → 用户看到的就是「右键完全没反应」
+//     · 而代码里**没有任何错误处理**，失败是彻底静默的。
+//
+//   所以现在：ready-to-show 只是「首选路径」，不是唯一路径。
+//   旁边挂着三条兜底（超时 / 加载失败 / 渲染进程崩溃），
+//   任何一条都能把菜单救回来；全都失败才退到原生菜单。
+const menuState = {
+  win: null,
+  ready: false,        // 菜单是不是已经显示出来了
+  settled: false,      // 已经 show 过（不管走的哪条路）
+  timer: null,         // ready-to-show 超时定时器
+  retries: 0,          // 已经重试过几次
+  fallbackShown: false // 原生菜单兜底是不是已经弹过了
+};
+
+const MENU_SHOW_TIMEOUT = 1200; // ms —— 超过这么久还没 ready-to-show 就走兜底
+const MENU_MAX_RETRIES = 2;     // 最多重建几次菜单窗口
+
+function clearMenuTimer() {
+  if (menuState.timer) {
+    clearTimeout(menuState.timer);
+    menuState.timer = null;
+  }
+}
+
+// 菜单已经确定显示出来了（不管是 ready-to-show 还是兜底路径）。
+function markMenuSettled(win) {
+  if (!win || win.isDestroyed()) return;
+  menuState.settled = true;
+  menuState.ready = true;
+}
+
+// 原生菜单兜底。
+//
+// ⚠️ 这是**最后**的退路：自绘菜单（menu.html）加载不出来的时候，
+//   至少让用户还能通过菜单把应用关掉 —— 总比「右键完全没反应」强。
+//   样式是系统默认的，跟玻璃/涂鸦风格对不上，但能用比不能用重要。
+//
+// 托盘那边也走这条 —— 托盘右键失败时如果什么都不做，用户连退出都做不到。
+function showNativeContextMenuFallback(screenX, screenY) {
+  if (menuState.fallbackShown) return;
+  menuState.fallbackShown = true;
+  try {
+    const template = contextMenuItems().map(it => {
+      if (it.type === 'separator') return { type: 'separator' };
+      return {
+        label: it.label,
+        click: () => runContextMenuAction(it.action)
+      };
+    });
+    const menu = Menu.buildFromTemplate(template);
+    const opts = { x: Math.round(screenX), y: Math.round(screenY) };
+    menu.popup(opts);
+    debugLog('context menu fell back to native Menu at ' + opts.x + ',' + opts.y);
+  } catch (err) {
+    debugLog('native context menu fallback failed: ' + err.message);
+  }
+}
+
+// 清理菜单窗口的各类定时器 / 状态。
+function resetMenuState() {
+  clearMenuTimer();
+  menuState.win = null;
+  menuState.ready = false;
+  menuState.settled = false;
+}
+
+function showContextMenu(screenX, screenY, isRetry) {
   // 已经在开着就换一个位置重开 —— 连点右键时不会留一个孤儿窗口。
   closeContextMenu();
+
+  // ⚠️ 重试计数**只在用户主动触发时**归零。
+  //   内部重试（isRetry=true）必须保留计数，否则会无限重试 ——
+  //   每次重试都调 showContextMenu，每次都把 retries 归零，
+  //   MENU_MAX_RETRIES 永远达不到，原生菜单兜底也就永远等不到。
+  //   （这个 bug 在回归测试里被抓出来了。）
+  if (!isRetry) {
+    menuState.retries = 0;
+    menuState.fallbackShown = false;
+  }
 
   const items = contextMenuItems();
   const theme = config.skinUi === 'doodle' ? 'doodle' : 'glass';
@@ -1269,7 +1386,7 @@ function showContextMenu(screenX, screenY) {
   // 下边放不下就往上挪。
   if (y + h > area.y + area.height) y = Math.max(area.y, area.y + area.height - h);
 
-  contextMenuWindow = new BrowserWindow({
+  const win = new BrowserWindow({
     x, y,
     width: w,
     height: h,
@@ -1301,28 +1418,108 @@ function showContextMenu(screenX, screenY) {
   }
   });
 
-  // 菜单真正显示过没有 —— blur 处理器要靠它来区分
-  // 「用户点了外面」和「窗口刚创建时的假 blur」。
-  let menuShown = false;
+  contextMenuWindow = win;
+  menuState.win = win;
+  menuState.ready = false;
+  menuState.settled = false;
+
+  // 把菜单项推给渲染进程 + 定好主题。
+  //
+  // ⚠️ 必须在 show 之前推 —— 推完再 show，渲染进程第一帧就有内容，
+  //   用户不会看到「一个空窗口闪一下才出菜单」。
+  const pushItems = () => {
+    if (!win || win.isDestroyed()) return;
+    try {
+      win.webContents.send('menu:items', items);
+      win.webContents.send('ui:theme-changed', theme);
+    } catch (err) {
+      debugLog('menu push failed: ' + err.message);
+    }
+  };
+
+  // 真正把菜单显示出来。
+  //
+  // ⚠️ 这个函数会被**好几条路径**调用（ready-to-show / 超时兜底 / 重试成功），
+  //   所以必须幂等 —— 只能显示一次。
+  const revealMenu = () => {
+    if (!win || win.isDestroyed()) return;
+    if (menuState.settled) return;
+    markMenuSettled(win);
+    clearMenuTimer();
+    try {
+      pushItems();
+      win.show();
+      // 拿到键盘焦点，Esc / 方向键才有用。
+      //
+      // ⚠️ 用 focus() 而不是 showInactive()：菜单是用户主动点出来的，
+      //   给它焦点是应该的；关闭时会还回去。
+      win.focus();
+    } catch (err) {
+      debugLog('menu reveal failed: ' + err.message);
+    }
+  };
 
   // ⚠️ 主题写进 URL，而不是等 show 之后再广播。
   //   广播发生在 ready-to-show 里，那时窗口已经 show 了 ——
   //   用户会看到第一帧是玻璃、然后才闪成涂鸦。
   //   放进 URL，脚本在模块加载时（第一帧之前）就把属性设好。
-  contextMenuWindow.loadFile('menu.html', { query: { theme } });
-  contextMenuWindow.once('ready-to-show', () => {
-    if (!contextMenuWindow || contextMenuWindow.isDestroyed()) return;
-    contextMenuWindow.show();
-    menuShown = true;
-    // 主题要先定好再显示 —— 否则第一帧是玻璃的、然后才切涂鸦，
-    // 用户会看到一下闪。
-    contextMenuWindow.webContents.send('menu:items', items);
-    contextMenuWindow.webContents.send('ui:theme-changed', theme);
-    // 拿到键盘焦点，Esc / 方向键才有用。
-    //
-    // ⚠️ 用 focus() 而不是 showInactive()：菜单是用户主动点出来的，
-    //   给它焦点是应该的；关闭时会还回去。
-    try { contextMenuWindow.focus(); } catch (_) { /* 窗口可能已经关了 */ }
+  win.loadFile('menu.html', { query: { theme } });
+
+  win.once('ready-to-show', () => {
+    revealMenu();
+  });
+
+  // ---- 兜底一：超时 ----
+  //
+  // ⚠️ ready-to-show 是**一次性**事件，还要求合成器真的产出了一帧。
+  //   睡眠/锁屏之后合成器可能没被唤醒，这个事件就永远不来。
+  //   所以给它挂一个超时：超过 1.2 秒还没 ready，就**直接 show**。
+  //
+  //   为什么不干脆用 did-finish-load？因为透明窗口在 show 之前
+  //   不一定有绘制缓冲，show 出来可能是空白的一闪。
+  //   ready-to-show 之所以被推荐，就是为了避免那个闪。
+  //   但「不闪」和「能显示」比，「能显示」更要紧 —— 超时路径就是
+  //   宁愿闪一下也不能不出现。
+  clearMenuTimer();
+  menuState.timer = setTimeout(() => {
+    menuState.timer = null;
+    if (!win || win.isDestroyed()) return;
+    if (menuState.settled) return;
+    debugLog('context menu ready-to-show timeout — showing anyway');
+    // 先把菜单项推过去 —— 渲染进程多半已经加载好了，只是没 ready。
+    pushItems();
+    try {
+      win.show();
+      markMenuSettled(win);
+      try { win.focus(); } catch (_) {}
+    } catch (err) {
+      debugLog('context menu timeout reveal failed: ' + err.message);
+    }
+  }, MENU_SHOW_TIMEOUT);
+
+  // ---- 兜底二：加载失败 ----
+  //
+  // 过去这里**什么都没有** —— 加载失败是完全静默的，
+  // 用户只看到「右键没反应」，还以为是电脑卡了。
+  win.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    debugLog('menu did-fail-load code=' + code + ' desc=' + desc + ' url=' + url);
+    // -3 是 ABORTED（用户主动取消），不算失败。
+    if (code === -3) return;
+    retryContextMenu(screenX, screenY, 'did-fail-load');
+  });
+
+  // ---- 兜底三：渲染进程崩溃 ----
+  win.webContents.on('render-process-gone', (_e, details) => {
+    debugLog('menu render-process-gone: ' + JSON.stringify(details));
+    retryContextMenu(screenX, screenY, 'render-process-gone');
+  });
+
+  win.webContents.on('preload-error', (_e, p, err) => {
+    debugLog('menu preload-error ' + p + ': ' + (err && err.message));
+  });
+
+  win.webContents.on('unresponsive', () => {
+    debugLog('menu unresponsive');
   });
 
   // 点菜单外面就关。
@@ -1333,19 +1530,125 @@ function showContextMenu(screenX, screenY) {
   // ⚠️ 但窗口刚创建、还没 show 的那一瞬间也会触发 blur（那时它压根
   //   没焦点）—— 不加闸门的话菜单会「刚弹出就自己关了」。
   //   所以只在菜单真正显示过之后才理会 blur。
-  contextMenuWindow.on('blur', () => {
-    if (!menuShown) return;
+  win.on('blur', () => {
+    if (!menuState.settled) return;
     closeContextMenu();
   });
 
-  contextMenuWindow.on('closed', () => {
-    contextMenuWindow = null;
+  win.on('closed', () => {
+    clearMenuTimer();
+    // ⚠️ 只有「这个窗口确实是我们当前持有的那个」才清空全局引用 ——
+    //   重试时会先建新窗口再关旧窗口，如果这里无条件置 null，
+    //   新窗口就被旧窗口的 closed 事件误伤成 null 了。
+    if (contextMenuWindow === win) contextMenuWindow = null;
+    if (menuState.win === win) {
+      menuState.win = null;
+      menuState.settled = false;
+      menuState.ready = false;
+    }
   });
+}
+
+// 菜单窗口没能正常显示出来 —— 重建一次试试。
+//
+// ⚠️ 重建而不是原地等，是因为「ready-to-show 不触发」这种情况
+//   往往是渲染进程/合成器的状态坏了，**同一个窗口救不回来** ——
+//   换一个新的渲染进程才是出路（实测睡眠/锁屏后新建的窗口就正常）。
+//
+//   重试用尽还不行，就退到原生菜单 —— 至少让用户还能操作、能退出。
+function retryContextMenu(screenX, screenY, reason) {
+  if (menuState.retries >= MENU_MAX_RETRIES) {
+    debugLog('context menu gave up after ' + menuState.retries + ' retries (' + reason +
+      ') — using native fallback');
+    closeContextMenu();
+    showNativeContextMenuFallback(screenX, screenY);
+    return;
+  }
+  menuState.retries++;
+  debugLog('context menu retry #' + menuState.retries + ' (' + reason + ')');
+  // 把旧窗口彻底清掉再建新的。
+  closeContextMenu();
+  setTimeout(() => {
+    // 用户可能在重试期间已经又点了一次右键 —— 那就放弃这次重试。
+    if (menuState.retries === 0) return;
+    // ⚠️ 第二个参数 isRetry=true —— 重试**不能**把 retries 归零，
+    //   否则永远重试不到上限，原生菜单兜底也就等不到。
+    showContextMenu(screenX, screenY, true);
+  }, 120);
 }
 
 function registerShortcuts() {
   globalShortcut.register('CommandOrControl+Alt+S', createSettingsWindow);
   globalShortcut.register('CommandOrControl+Alt+H', togglePet);
+}
+
+// ---------- 睡眠 / 锁屏 / 唤醒 ----------
+//
+// ⚠️ 用户报过：「右键小猫和托盘图标都不会弹出右键菜单了，失效时机未知，
+//   貌似在电脑睡眠或者锁屏后出现」。
+//
+//   睡眠/锁屏期间，Chromium 的渲染进程和合成器会被冻结甚至重启
+//   （日志里能见到 "Network service crashed or was terminated, restarting service"）。
+//   唤醒之后如果渲染进程没恢复，新的 BrowserWindow 就可能永远等不到
+//   'ready-to-show' —— 菜单窗口卡在 show:false，用户看到的就是「右键没反应」。
+//
+//   这里的做法是**在唤醒的那一刻把状态清干净**：
+//     · 关掉可能卡住的菜单窗口（下次右键会建一个全新的）
+//     · 重建托盘图标（睡眠期间 Explorer 可能重启过，图标注册失效）
+//     · 让穿透裁决重新算一次（睡眠时光标位置可能变了）
+//
+//   这样「唤醒后第一次右键」就走的是一条干净的路。
+function handleWakeUp(reason) {
+  debugLog('system wake: ' + reason);
+  try {
+    // 菜单窗口如果还挂着（多半是卡住的），直接扔掉 —— 下次右键重建。
+    if (contextMenuWindow && !contextMenuWindow.isDestroyed()) {
+      debugLog('wake: dropping stale context menu window');
+      closeContextMenu();
+    }
+  } catch (err) {
+    debugLog('wake: close menu failed: ' + err.message);
+  }
+
+  // 托盘图标重建 —— 睡眠期间资源管理器可能重启过，
+  // 之前注册的图标就没了（跟 TaskbarCreated 一个道理）。
+  try {
+    if (tray && !tray.isDestroyed()) {
+      try { tray.destroy(); } catch (_) {}
+      tray = null;
+    }
+    createTray();
+    debugLog('wake: tray re-created');
+  } catch (err) {
+    debugLog('wake: tray re-create failed: ' + err.message);
+  }
+
+  // 穿透状态重新裁决 —— 睡眠时光标可能不在猫身上。
+  try { updateIgnoreFromCursor(); } catch (_) {}
+}
+
+function watchPowerEvents() {
+  if (process.platform === 'linux' || process.platform === 'win32' || process.platform === 'darwin') {
+    try {
+      powerMonitor.on('suspend', () => {
+        debugLog('power: suspend');
+        // 挂起前就把菜单收掉，别留一个卡住的窗口。
+        try { closeContextMenu(); } catch (_) {}
+      });
+      powerMonitor.on('resume', () => handleWakeUp('resume'));
+      powerMonitor.on('lock-screen', () => {
+        debugLog('power: lock-screen');
+        try { closeContextMenu(); } catch (_) {}
+      });
+      powerMonitor.on('unlock-screen', () => handleWakeUp('unlock-screen'));
+      // 锁屏时用户可能在别的应用里 —— 唤醒时把桌宠拉回屏幕内。
+      powerMonitor.on('user-did-become-active', () => {
+        try { ensurePetVisible(); } catch (_) {}
+      });
+    } catch (err) {
+      debugLog('power monitor unavailable: ' + err.message);
+    }
+  }
 }
 
 // ---------- IPC ----------
@@ -1355,6 +1658,30 @@ ipcMain.on('settings:get-config', event => { event.returnValue = config; });
 ipcMain.on('pet:open-settings', createSettingsWindow);
 ipcMain.on('pet:open-demo', showDemoWindow);
 ipcMain.on('pet:show-context-menu', (_event, x, y) => popupPetContextMenu(x, y));
+
+// 自绘菜单**主动拉**菜单项。
+//
+// ⚠️ 为什么除了 send 还留一条同步的：
+//   主进程 send('menu:items') 的时机在 ready-to-show 之前，
+//   那时渲染进程的 preload 可能还没注册上 on('menu:items')，
+//   IPC 被静默丢弃 → 菜单弹出来是**一片空白**（用户以为程序卡了）。
+//   渲染进程主动同步拉取就没有这个竞态。
+ipcMain.on('menu:get-items', event => {
+  try {
+    event.returnValue = contextMenuItems();
+  } catch (err) {
+    event.returnValue = [];
+  }
+});
+
+// 渲染进程异步再要一次菜单项（同步拉取失败时的补救）。
+ipcMain.on('menu:request-items', event => {
+  try {
+    event.sender.send('menu:items', contextMenuItems());
+  } catch (err) {
+    debugLog('menu:request-items failed: ' + err.message);
+  }
+});
 
 // 自绘菜单点了某一项。
 ipcMain.on('menu:pick', (_event, action) => {
@@ -1665,6 +1992,8 @@ app.whenReady().then(() => {
   }
   // 轮询 Windows 托盘可见性开关 —— 用户在系统设置里拨了开关就自动生效。
   startTrayPoll();
+  // 睡眠 / 锁屏 / 唤醒 —— 唤醒后把渲染进程和托盘的状态清干净。
+  watchPowerEvents();
   registerShortcuts();
   applyLoginItem();
 });

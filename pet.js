@@ -424,6 +424,12 @@
   stage.addEventListener('contextmenu', e => {
     e.preventDefault();
     e.stopPropagation();
+    // ⚠️ 这条路径之前**完全没有日志** —— 排查「右键没反应」时
+    //   根本看不出 DOM 事件有没有到渲染进程。现在记一笔。
+    if (api.debug) {
+      api.debug('contextmenu at ' + Math.round(e.clientX) + ',' + Math.round(e.clientY) +
+        ' hit=' + onDragArea(e.clientX, e.clientY));
+    }
     if (!onDragArea(e.clientX, e.clientY)) return;
     api.showContextMenu(e.screenX, e.screenY);
   });
