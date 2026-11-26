@@ -1,14 +1,32 @@
 const {
-  app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, globalShortcut, screen
+  app, BrowserWindow, ipcMain, Menu, Tray, nativeImage, globalShortcut, screen, shell
 } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const { execFile } = require('child_process');
-const nativeHook = require('./native-hook');
+const inputBackend = require('./input');
 const passwordProbe = require('./password-probe');
 
-// 全局键盘/鼠标监听由主进程内的 Win32 低层钩子提供（见 native-hook.js），
+// ---------- AUMID（Windows 应用用户模型 ID） ----------
+//
+// ⚠️ 不设的话，Windows 任务栏「隐藏图标」列表会**按 exe 完整路径**记录，
+//   而 electron-builder 的 portable 目标每次运行都解压到
+//   `%TEMP%\3XXXXXXXXXX\`（随机新目录）再从那里启动 ——
+//   路径每次都不同，Windows 就当成新程序，每跑一次就多一条托盘历史记录。
+//   （实测跑 7 次便携版，任务栏里就有 7 个「小叽」图标。）
+//
+// 设了 AUMID 之后，Windows 按 AUMID 归组托盘图标，
+// 路径变了也认得出是同一个程序 —— 不会再增殖。
+//
+// ⚠️ 必须跟 package.json 的 build.appId 一致，否则 Windows 认不出来。
+// ⚠️ 必须在 app ready 之前设置。
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.workbuddy.littlething.cat');
+}
+
+// 全局键盘/鼠标监听由主进程内的输入后端提供（见 input/index.js）。
+// Windows 走 koffi 直调 Win32 低层钩子，macOS / Linux(X11) 走 libuiohook。
 // 不再需要独立 node.exe 子进程，也不再打包 69MB 的 Node 运行时。
 
 // ---------- Chromium 运行时调优 ----------
@@ -96,6 +114,12 @@ const DEFAULTS = {
   autoDemo: false,
   globalKeys: true,
   globalMouse: true,
+  // 「允许鼠标躁动」：手边那只鼠标要不要自己乱晃。
+  // 默认关闭 —— 修复前它是无条件生效的（桌面端 60Hz 钩子不停叠加随机扰动，
+  // 看起来像手在抽搐）。效果本身挺可爱，所以保留成开关，让用户自己选。
+  mouseJitter: false,
+  // 躁动强度，0..1。滑杆 0..100 换算过来。
+  mouseJitterAmount: 0.5,
   sleepMinutes: 2,
   opacity: 1,
   scale: 1,
@@ -104,7 +128,10 @@ const DEFAULTS = {
   allowDrag: true,
   secretMode: true,
   debug: false,
-  position: null
+  position: null,
+  // 界面风格：'glass'（苹果液态玻璃）/ 'doodle'（卡通涂鸦）。
+  // 默认液态玻璃 —— 用户要的是「苹果系统风格」。
+  skinUi: 'glass'
 };
 
 const I18N = {
@@ -115,7 +142,6 @@ const I18N = {
     trayTip: '小叽 · 桌宠',
     togglePet: '显示 / 隐藏 小叽',
     settings: '设置…',
-    demo: '打开演示窗口',
     resetPosition: '窗口回到屏幕内',
     quit: '退出',
     file: '文件',
@@ -142,7 +168,6 @@ const I18N = {
     trayTip: 'LittleThing · Desktop Pet',
     togglePet: 'Show / Hide LittleThing',
     settings: 'Settings…',
-    demo: 'Open Demo Window',
     resetPosition: 'Bring Window On Screen',
     quit: 'Quit',
     file: 'File',
@@ -470,7 +495,15 @@ function createSettingsWindow() {
     }
   });
 
-  settingsWindow.loadFile('settings.html');
+  // ⚠️ 主题写进 URL —— 否则 settings.html 里写死的 data-skin-ui="glass"
+  //   会让「上次选了涂鸦」的用户在打开设置页时先看到一下玻璃色再跳过去。
+  const theme = config.skinUi === 'doodle' ? 'doodle' : 'glass';
+  settingsWindow.loadFile('settings.html', { query: { theme } });
+  // ⚠️ 设置窗口获得焦点 → 重新注册托盘图标。
+  //   用户多半是去 Windows「任务栏设置 → 其他系统托盘图标」里拨了小叽的
+  //   显示开关，然后点回本程序 —— 这时候重新注册一次（NIM_ADD），
+  //   系统才会按新状态决定图标显不显示。详见 refreshTrayForSystemSettings()。
+  settingsWindow.on('focus', () => { refreshTrayForSystemSettings(); });
   settingsWindow.on('closed', () => { settingsWindow = null; });
 }
 
@@ -500,21 +533,25 @@ function createSkinEditorWindow(baseId) {
   }
 
   skinEditorWindow = new BrowserWindow({
-    // The window is sized so the editor's three columns come out the same
-    // width as the web version's dialog (which is `min(1180px, 96vw)`).
+    // 窗口按「内容真正需要多大」来定，而不是越大越好。
     //
-    // The middle column holds the live 3D preview and it takes whatever
-    // width the other two columns leave over: 250px + 290px fixed, so the
-    // preview needs ~570px to reach the web version's 538px stage. At the
-    // old 1000px the preview was squeezed to 361px and the cat looked
-    // squashed — the two hosts were showing the same cat at different sizes.
-    width: 1216,
-    height: 820,
-    // The narrowest the layout still works: below ~880px the CSS stacks
-    // the three columns into one, so the window is not allowed to get
-    // that far down.
-    minWidth: 900,
-    minHeight: 560,
+    // 三栏布局：左 250（基础皮肤+配色） / 中 1fr（预览） / 右 300（花纹），
+    // 底部横跨一条体型栏。
+    //
+    // 宽度 1240：250 + 300 + 两道间距(28) + 预览至少 340 + 外壳边距 ≈ 960，
+    // 1240 留出余量，预览画布能撑到 340px 限宽。
+    //
+    // 高度 860：三栏最高的是左栏（底子列表 146 + 配色 4 列 2 行 + 精度）
+    // 约 460px，右栏花纹约 350px，底部体型分组折叠后约 200px ——
+    // 460 + 200 + 间距 + 顶栏 + 外壳边距 ≈ 840。860 刚好装下不用滚。
+    //
+    // ⚠️ 这个尺寸是「一屏显示完整」的硬约束：
+    //   用户明确要求不用 Tab、一屏看全。窗口给小了就得滚，
+    //   滚动条一出现「一屏」就名存实亡。
+    width: 1240,
+    height: 860,
+    minWidth: 1000,
+    minHeight: 700,
     title: tr('skinEditorTitle'),
     icon: appIcon() || undefined,
     webPreferences: {
@@ -535,9 +572,17 @@ function createSkinEditorWindow(baseId) {
     skinEditorWindow.webContents.send('skin-editor:open', { baseId: baseId || '' });
   });
 
+  skinEditorWindow.on('focus', () => { refreshTrayForSystemSettings(); });
   skinEditorWindow.on('closed', () => { skinEditorWindow = null; });
 }
 
+// 演示窗口 —— 独立的展示窗口，内含一只 3D 小猫 + 一些控制面板。
+//
+// ⚠️ 它不再是桌宠右键菜单的入口了（用户要求去掉那个入口）。
+//   现在只能由设置页打开（或者程序内部调用）。
+//
+// 演示窗口跟着全局界面风格走 —— 跟设置窗口、皮肤编辑器、右键菜单
+// 用同一套变量（assets/ui-theme-vars.css）。
 function showDemoWindow() {
   if (demoWindow && !demoWindow.isDestroyed()) {
     demoWindow.focus();
@@ -548,6 +593,7 @@ function showDemoWindow() {
     width: 1040,
     height: 860,
     title: tr('demoTitle'),
+    icon: appIcon() || undefined,
     webPreferences: {
       // 演示窗口也要读写用户自己的皮肤 —— 它和设置页、编辑器共用
       // userData 目录里的那一个文件。
@@ -557,7 +603,10 @@ function showDemoWindow() {
     }
   });
 
-  demoWindow.loadFile('index.html');
+  // ⚠️ 主题写进 URL —— 否则页面里写死的 data-skin-ui="glass"
+  //   会让「上次选了涂鸦」的用户在打开演示窗口时先看到一下玻璃色再跳过去。
+  const theme = config.skinUi === 'doodle' ? 'doodle' : 'glass';
+  demoWindow.loadFile('index.html', { query: { theme } });
   demoWindow.on('closed', () => { demoWindow = null; });
 }
 
@@ -660,6 +709,8 @@ function applyLoginItem() {
 
 function applyConfig(next) {
   const wasInputHook = config.globalKeys || config.globalMouse;
+  const wasKeys = config.globalKeys;
+  const wasMouse = config.globalMouse;
   config = { ...config, ...next };
   saveConfig();
   applyLocalizedUI();
@@ -667,6 +718,11 @@ function applyConfig(next) {
   const inputHook = config.globalKeys || config.globalMouse;
   if (inputHook && !wasInputHook) initInputHook();
   else if (!inputHook && wasInputHook) stopInputHook();
+  // 两个开关都开着，但用户改了其中之一 —— 换订阅。
+  // 后端支持按需安装钩子，所以「只开鼠标」时不会装键盘钩子。
+  else if (inputHook && (wasKeys !== config.globalKeys || wasMouse !== config.globalMouse)) {
+    resubscribeInputHook();
+  }
 
   // 保密模式开着就探测，关掉就停 —— 探测器会问系统「焦点是不是密码框」，
   // 属于系统级读取，关掉后立即停止，不留后台开销。
@@ -814,17 +870,35 @@ function stopIgnorePolling() {
   ignorePollTimer = null;
 }
 
-function initInputHook() {
-  if (nativeHook.isRunning()) return;
-  const hookDir = app.isPackaged
+function inputHookDir() {
+  return app.isPackaged
     ? path.join(process.resourcesPath, 'hook')
     : path.join(__dirname, 'resources', 'hook');
-  debugLog('starting native input hook: ' + hookDir);
-  nativeHook.start(hookDir, sendHookEvent);
+}
+
+function initInputHook() {
+  if (inputBackend.isRunning()) return;
+  const hookDir = inputHookDir();
+  debugLog('starting global input backend: ' + hookDir);
+  inputBackend.start(hookDir, sendHookEvent, {
+    wantKeyboard: config.globalKeys,
+    wantMouse: config.globalMouse
+  });
+}
+
+// 改订阅时用这个：只在订阅真的变了时才重装钩子。
+function resubscribeInputHook() {
+  const hookDir = inputHookDir();
+  debugLog('resubscribing input backend: keys=' + config.globalKeys +
+    ' mouse=' + config.globalMouse);
+  inputBackend.resubscribe(hookDir, sendHookEvent, {
+    wantKeyboard: config.globalKeys,
+    wantMouse: config.globalMouse
+  });
 }
 
 function stopInputHook() {
-  nativeHook.stop();
+  inputBackend.stop();
 }
 
 // ---------- 保密模式：探测用户是否正在密码框输入 ----------
@@ -919,22 +993,13 @@ function sendSecretState(isPassword, cursorX) {
   petWindow.webContents.send('pet:secret-state', { isPassword, dir });
 }
 
-function trayTemplate() {
-  return [
-    { label: tr('togglePet'), click: togglePet },
-    { label: tr('settings'), click: createSettingsWindow },
-    { label: tr('demo'), click: showDemoWindow },
-    { label: tr('resetPosition'), click: bringPetOnScreen },
-    { type: 'separator' },
-    { label: tr('quit'), click: quitApp }
-  ];
-}
-
 function applyLocalizedUI() {
   applyMenu();
   if (tray) {
     tray.setToolTip(tr('trayTip'));
-    tray.setContextMenu(Menu.buildFromTemplate(trayTemplate()));
+    // ⚠️ 这里**不再** setContextMenu —— 原生菜单是操作系统画的，
+    //   换不了皮。托盘右键现在弹的是自绘菜单，跟小猫身上右键同一个窗口。
+    //   托盘菜单的内容由 contextMenuItems() 提供（跟小猫右键完全一致）。
   }
   if (settingsWindow && !settingsWindow.isDestroyed()) {
     settingsWindow.setTitle(tr('settingsTitle'));
@@ -948,19 +1013,334 @@ function createTray() {
   const icon = trayIcon();
   tray = new Tray(icon);
   applyLocalizedUI();
-  tray.on('click', togglePet);
+
+  // ⚠️ **左键单击托盘图标不再切换桌宠的显示/隐藏**（用户明确要求）。
+  //
+  //   用户的原话：「鼠标左键点击系统托盘图标的时候不要一下显示再点击一下
+  //   就隐藏」—— 单击不应该是一个「开关」。
+  //
+  //   ⚠️ 但**右键菜单里的「显示 / 隐藏 小叽」那一项要保留**
+  //     （用户明确补充过）。菜单项在 contextMenuItems() 里，
+  //     托盘右键和小猫右键共用同一份，所以两处都还有。
+  //
+  //   现在左键单击 = 打开跟小猫右键一模一样的菜单。
+  //   菜单里想显示/隐藏就点那一项 —— 想显式控制，而不是被单击绑架。
+  tray.on('click', () => {
+    const p = screen.getCursorScreenPoint();
+    showContextMenu(p.x, p.y);
+  });
+
+  // 托盘图标右键 → 弹自绘菜单（跟小猫身上右键一模一样）。
+  //
+  // ⚠️ 为什么不用 tray.setContextMenu：
+  //   原生菜单是**操作系统**画的（Windows 上就是标准 Win32 菜单），
+  //   想让它跟设置页、皮肤编辑器一样有液态玻璃/涂鸦风是做不到的 ——
+  //   CSS 根本够不着系统菜单。用户看到的两个右键菜单长得不一样，
+  //   就像「这个程序一半新一半旧」。
+  //   所以托盘也走 showContextMenu()，跟小猫右键共用同一扇窗口、
+  //   同一份菜单项、同一套主题。
+  tray.on('right-click', () => {
+    const p = screen.getCursorScreenPoint();
+    showContextMenu(p.x, p.y);
+  });
+}
+
+// 把托盘图标**重新注册**一遍（先销毁再建一个新的）。
+//
+// ⚠️ 为什么需要这个：
+//   Windows 11 的「任务栏设置 → 其他系统托盘图标」里，每个应用有一个
+//   独立的显示开关。系统把这个开关的状态记在注册表
+//   HKCU\Control Panel\NotifyIconSettings 下（按**可执行文件路径**索引，
+//   字段名是 ExecutablePath，IsPromoted=1 表示显示）。
+//
+//   关键在于：**系统只在图标被「添加」（Shell_NotifyIcon 的 NIM_ADD）
+//   的那一刻**去读这个开关并决定图标显示不显示。
+//   `tray.setImage()` / `setToolTip()` 走的是 NIM_MODIFY —— 只改内容，
+//   **不重新走一遍可见性判定**，所以用户在系统设置里拨了开关之后，
+//   程序这边再怎么做都看不到变化。
+//
+//   销毁 + 重新 new Tray() 会再发一次 NIM_ADD，系统就会按**当前的**
+//   开关状态重新决定显不显示。
+//
+// 什么时候做：
+//   用户去 Windows 设置里改托盘开关，回来时焦点回到本程序 —— 这时候
+//   重新注册一次，设置立刻生效，不用重启程序。
+//
+// ⚠️ 桌面端的桌宠窗口**永远不抢焦点**（否则用户在密码框里没法打字），
+//   所以这个刷新挂在设置窗口/编辑器窗口的 focus 上。
+let _trayRefreshTimer = 0;
+function refreshTrayForSystemSettings() {
+  // 节流：连续切窗口时别反复重建图标（重建会有一下闪烁）。
+  if (_trayRefreshTimer) return;
+  _trayRefreshTimer = setTimeout(() => {
+    _trayRefreshTimer = 0;
+    if (!tray || tray.isDestroyed()) return;
+    try {
+      tray.destroy();
+    } catch (_) {
+      // 销毁失败就放弃这次刷新 —— 总比让整个应用崩掉强。
+      return;
+    }
+    createTray();
+    debugLog('tray re-registered (system tray settings may now apply)');
+  }, 800);
+}
+
+// ---------- 托盘开关主动轮询 ----------
+//
+// ⚠️ 为什么需要这个：
+//   上面那个「焦点回到窗口就刷新」只能覆盖「用户改完开关后点回程序」的情况。
+//   但用户完全可能改完开关就**放着不管**，直接去看任务栏 —— 这时候
+//   程序这边什么都不知道，托盘图标当然不会变。
+//
+//   Windows 没有「托盘图标可见性变了」的官方通知（Shell_NotifyIcon 那边
+//   什么回调都没有），所以只能**轮询注册表**：把
+//   HKCU\Control Panel\NotifyIconSettings 下属于本 exe 的那条记录的
+//   IsPromoted 读出来，跟上一次的值比。变了就重新注册托盘图标
+//   （重新发一次 NIM_ADD，系统才会按新状态决定显不显示）。
+//
+// ⚠️ 为什么用 PowerShell 而不是 koffi：
+//   advapi32 的注册表 API 用 koffi 直调也能做，但 koffi 是**原生模块**，
+//   打包路径（resources/hook/node_modules/koffi）在某些环境下不稳，
+//   而这里只是读一个值，用系统自带的 PowerShell 更保险。
+//   ⚠️ 绝对不能用 `reg.exe` —— 它在受保护环境的 Program Blacklist 里。
+//
+// ⚠️ 轮询间隔 5 秒：再密就是浪费 CPU，再疏用户会觉得「怎么还没变」。
+const TRAY_POLL_INTERVAL = 5000;
+let _trayPollTimer = null;
+let _lastTrayPromoted = null;
+
+function readTrayPromotedState() {
+  return new Promise(resolve => {
+    if (process.platform !== 'win32') { resolve(null); return; }
+    const exePath = process.execPath || '';
+    // 用单引号包住路径并把内嵌单引号转义 —— 路径里可能有括号和空格。
+    const ps = `$b='HKCU:\\Control Panel\\NotifyIconSettings';`
+      + `if(Test-Path $b){Get-ChildItem $b | ForEach-Object{`
+      + `$p=(Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).ExecutablePath;`
+      + `if($p -and ($p -ieq '${exePath.replace(/'/g, "''")}')){`
+      + `$i=(Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue).IsPromoted;`
+      + `Write-Output $i;break}}}`
+      + `else{Write-Output 'NOTFOUND'}`;
+    execFile('powershell.exe',
+      ['-NoProfile', '-NonInteractive', '-Command', ps],
+      { timeout: 8000, windowsHide: true },
+      (err, stdout) => {
+        if (err) { resolve(null); return; }
+        const s = String(stdout || '').trim();
+        if (!s || s === 'NOTFOUND') { resolve(null); return; }
+        if (s === '1' || s === 'True') { resolve(true); return; }
+        if (s === '0' || s === 'False') { resolve(false); return; }
+        resolve(null);
+      });
+  });
+}
+
+function startTrayPoll() {
+  if (process.platform !== 'win32') return;
+  if (_trayPollTimer) return;
+  _trayPollTimer = setInterval(async () => {
+    if (!tray || tray.isDestroyed()) return;
+    const now = await readTrayPromotedState();
+    if (now == null) return;          // 读不到（没记录 / 出错）→ 不动
+    if (_lastTrayPromoted === null) {
+      _lastTrayPromoted = now;        // 第一次只是建立基线
+      return;
+    }
+    if (_lastTrayPromoted === now) return;
+    _lastTrayPromoted = now;
+    debugLog('tray visibility setting changed (' + now + ') — re-registering');
+    refreshTrayForSystemSettings();
+  }, TRAY_POLL_INTERVAL);
+  // 定时器不该拖着进程不让退出。
+  if (_trayPollTimer.unref) _trayPollTimer.unref();
 }
 
 // 在桌宠窗口上按右键时弹出跟托盘一样的菜单。
+//
+// ⚠️ 这里用的是**自绘菜单**（menu.html），不是 Electron 原生 Menu：
+//   原生菜单是操作系统画的（Windows 上就是标准 Win32 菜单），
+//   想让它跟设置页、皮肤编辑器一样有液态玻璃/涂鸦风是做不到的 ——
+//   CSS 根本够不着系统菜单。所以自己画一个 HTML 窗口来当菜单。
+//
+// 托盘图标右键也走这里 —— 两处共用同一扇窗口、同一份菜单项、同一套主题。
+// 之前托盘用原生菜单、小猫用自绘菜单，两个右键长得完全不一样。
+//
 // 用 popup 而不是 setContextMenu：托盘的右键菜单由系统托盘负责定位，
 // 窗口内弹出要用鼠标的屏幕坐标，否则菜单会跑到窗口左上角。
 function popupPetContextMenu(screenX, screenY) {
   if (!petWindow || petWindow.isDestroyed()) return;
-  const menu = Menu.buildFromTemplate(trayTemplate());
-  const [wx, wy] = petWindow.getPosition();
-  const x = Number.isFinite(screenX) ? Math.round(screenX - wx) : 0;
-  const y = Number.isFinite(screenY) ? Math.round(screenY - wy) : 0;
-  menu.popup({ window: petWindow, x, y });
+  showContextMenu(screenX, screenY);
+}
+
+// ---------- 自绘右键菜单 ----------
+//
+// 一个透明的无边框小窗口，里面画一份菜单项。
+//
+// 小猫右键和托盘右键都走这里 —— 所以两个菜单的内容、样式、主题
+// 天然一致，不需要维护两份。
+let contextMenuWindow = null;
+
+// 菜单项表。托盘右键和小猫右键共用这一份 —— 免得以后加一项只加了一边。
+//
+// ⚠️ 「打开演示窗口」这一项已经去掉了（用户要求）。
+//   演示窗口不再是桌宠的日常功能，留在右键菜单里只是占位置。
+//   演示模式本身还在 —— 设置页的「演示模式（自动打字）」开关控制的是
+//   桌宠自己自动敲键盘，跟这个窗口无关。
+function contextMenuItems() {
+  return [
+    { type: 'item', label: tr('togglePet'), action: 'toggle-pet' },
+    { type: 'item', label: tr('settings'), action: 'settings' },
+    { type: 'item', label: tr('resetPosition'), action: 'reset-position' },
+    { type: 'separator' },
+    { type: 'item', label: tr('quit'), action: 'quit' },
+  ];
+}
+
+// 菜单动作 → 真正干活的函数。
+function runContextMenuAction(action) {
+  switch (action) {
+    case 'toggle-pet': togglePet(); break;
+    case 'settings': createSettingsWindow(); break;
+    case 'reset-position': bringPetOnScreen(); break;
+    case 'quit': quitApp(); break;
+    default: break;
+  }
+}
+
+// 关掉菜单窗口（如果开着）。
+//
+// ⚠️ 焦点必须**还给菜单弹出前的那个窗口**。
+//   菜单为了收键盘事件拿了焦点（Esc/方向键），关的时候不还回去，
+//   用户正在密码框里打字就会被打断 —— 光标跳到别处去了。
+//   保密模式的意义就打了折扣。
+function closeContextMenu() {
+  if (!contextMenuWindow || contextMenuWindow.isDestroyed()) {
+    contextMenuWindow = null;
+    return;
+  }
+  // 记下菜单打开前谁有焦点。
+  const prev = BrowserWindow.getFocusedWindow();
+  const win = contextMenuWindow;
+  contextMenuWindow = null;
+  win.destroy();
+  // 焦点还给原来那个窗口 —— 但**不能 focus 桌宠**：
+  // 桌宠抢焦点会让用户在密码框里没法打字。
+  // 所以只还给「非桌宠」的窗口。
+  if (prev && !prev.isDestroyed() && prev !== petWindow && prev !== win) {
+    try { prev.focus(); } catch (_) { /* 那窗口可能刚关了 */ }
+  }
+}
+
+function showContextMenu(screenX, screenY) {
+  // 已经在开着就换一个位置重开 —— 连点右键时不会留一个孤儿窗口。
+  closeContextMenu();
+
+  const items = contextMenuItems();
+  const theme = config.skinUi === 'doodle' ? 'doodle' : 'glass';
+
+  // 窗口尺寸：菜单项数决定高度，宽度固定。
+  //
+  // ⚠️ 高度按项数算死，是因为自绘窗口没法像原生菜单那样
+  //   「先显示再量」。算不准就宁可给足高度 —— 面板自己会按内容撑开，
+  //   剩下的空间是透明的（菜单面板 background 只画到内容高度）。
+  const ITEM_H = 30;
+  const SEP_H = 9;
+  const PAD = 10;
+  let h = PAD;
+  for (const it of items) h += it.type === 'separator' ? SEP_H : ITEM_H;
+  h += PAD;
+
+  const w = 190;
+
+  // 定位：优先用鼠标的屏幕坐标；拿不到就用桌宠窗口的左上角。
+  const cursor = (Number.isFinite(screenX) && Number.isFinite(screenY))
+    ? { x: Math.round(screenX), y: Math.round(screenY) }
+    : screen.getCursorScreenPoint();
+
+  // ⚠️ 必须夹在**当前显示器**的工作区里 —— 多显示器时，
+  //   在副屏边缘点右键，菜单会有一半跑到屏幕外面去。
+  const display = screen.getDisplayNearestPoint(cursor);
+  const area = display.workArea;
+  let x = cursor.x;
+  let y = cursor.y;
+  // 右边放不下就往左挪（贴着鼠标的左边展开）。
+  if (x + w > area.x + area.width) x = Math.max(area.x, cursor.x - w);
+  // 下边放不下就往上挪。
+  if (y + h > area.y + area.height) y = Math.max(area.y, area.y + area.height - h);
+
+  contextMenuWindow = new BrowserWindow({
+    x, y,
+    width: w,
+    height: h,
+    show: false,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    skipTaskbar: true,
+  // 菜单要盖在桌宠上面。
+  alwaysOnTop: true,
+  // ⚠️ 菜单**必须能拿到键盘焦点** —— 原生菜单右键弹出后，
+  //   Esc 关闭、方向键上下选都是白送的。用户已经习惯了这些，
+  //   自己画的菜单没有它们就等于降级了。
+  //   focusable: false 的窗口收不到键盘事件。
+  //
+  // ⚠️ 但焦点不能「一去不回」—— 关菜单时必须还给原来的窗口，
+  //   否则用户正在密码框里打字，光标就跳到别处去了。
+  //   见 closeContextMenu() 里的 focus 归还逻辑。
+  focusable: true,
+  hasShadow: false,
+  webPreferences: {
+    preload: path.join(__dirname, 'menu-preload.js'),
+    nodeIntegration: false,
+    contextIsolation: true
+  }
+  });
+
+  // 菜单真正显示过没有 —— blur 处理器要靠它来区分
+  // 「用户点了外面」和「窗口刚创建时的假 blur」。
+  let menuShown = false;
+
+  // ⚠️ 主题写进 URL，而不是等 show 之后再广播。
+  //   广播发生在 ready-to-show 里，那时窗口已经 show 了 ——
+  //   用户会看到第一帧是玻璃、然后才闪成涂鸦。
+  //   放进 URL，脚本在模块加载时（第一帧之前）就把属性设好。
+  contextMenuWindow.loadFile('menu.html', { query: { theme } });
+  contextMenuWindow.once('ready-to-show', () => {
+    if (!contextMenuWindow || contextMenuWindow.isDestroyed()) return;
+    contextMenuWindow.show();
+    menuShown = true;
+    // 主题要先定好再显示 —— 否则第一帧是玻璃的、然后才切涂鸦，
+    // 用户会看到一下闪。
+    contextMenuWindow.webContents.send('menu:items', items);
+    contextMenuWindow.webContents.send('ui:theme-changed', theme);
+    // 拿到键盘焦点，Esc / 方向键才有用。
+    //
+    // ⚠️ 用 focus() 而不是 showInactive()：菜单是用户主动点出来的，
+    //   给它焦点是应该的；关闭时会还回去。
+    try { contextMenuWindow.focus(); } catch (_) { /* 窗口可能已经关了 */ }
+  });
+
+  // 点菜单外面就关。
+  //
+  // ⚠️ 菜单是 alwaysOnTop 的，用户点别处时焦点会转走 —— 这个 blur
+  //   就是「用户点了外面」的信号。
+  //
+  // ⚠️ 但窗口刚创建、还没 show 的那一瞬间也会触发 blur（那时它压根
+  //   没焦点）—— 不加闸门的话菜单会「刚弹出就自己关了」。
+  //   所以只在菜单真正显示过之后才理会 blur。
+  contextMenuWindow.on('blur', () => {
+    if (!menuShown) return;
+    closeContextMenu();
+  });
+
+  contextMenuWindow.on('closed', () => {
+    contextMenuWindow = null;
+  });
 }
 
 function registerShortcuts() {
@@ -975,6 +1355,17 @@ ipcMain.on('settings:get-config', event => { event.returnValue = config; });
 ipcMain.on('pet:open-settings', createSettingsWindow);
 ipcMain.on('pet:open-demo', showDemoWindow);
 ipcMain.on('pet:show-context-menu', (_event, x, y) => popupPetContextMenu(x, y));
+
+// 自绘菜单点了某一项。
+ipcMain.on('menu:pick', (_event, action) => {
+  // 先关菜单再执行动作 —— 有些动作（比如「退出」）会结束整个应用，
+  // 菜单留着会变成一个关不掉的孤儿窗口。
+  closeContextMenu();
+  runContextMenuAction(action);
+});
+
+// 自绘菜单请求关闭（Esc、点外面、点空白处）。
+ipcMain.on('menu:close', () => closeContextMenu());
 ipcMain.on('pet:quit', () => { isQuitting = true; app.quit(); });
 ipcMain.on('pet:renderer-log', (_event, message) => {
   if (config.debug) debugLog('renderer: ' + message);
@@ -1029,6 +1420,64 @@ ipcMain.on('settings:save-config', (_event, next) => {
   if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.close();
 });
 
+// 设置页切「界面风格」用的独立通道。
+//
+// ⚠️ 为什么不能直接用 settings:save-config：
+//   那个通道的语义是「设置页保存完毕，把设置窗口关掉」—— 它会
+//   主动 settingsWindow.close()。用户在设置页切个风格，窗口却自己关了。
+//
+// ⚠️ 为什么不用 applyConfig：
+//   applyConfig 会连带做一堆事 —— 重建输入钩子、改桌宠尺寸和透明度、
+//   重测保密模式、改开机自启。换风格跟这些**毫无关系**，跑了既浪费
+//   又有副作用（比如桌宠突然闪一下）。
+//
+// 所以这里只做「合并配置 + 存盘」这一件事，跟编辑器那个通道一个思路。
+ipcMain.on('settings:save-ui-theme', (_event, theme) => {
+  const value = theme === 'doodle' ? 'doodle' : 'glass';
+  if (config.skinUi === value) return;   // 没变就别写盘
+  config = { ...config, skinUi: value };
+  saveConfig();
+  broadcastUiTheme(value);
+});
+
+// 界面风格变了 —— 告诉所有还开着的窗口。
+//
+// ⚠️ 为什么需要广播：
+//   设置页、皮肤编辑器、右键菜单可以同时开着。用户在一个地方切了风格，
+//   另一个还停在旧样子 —— 看着像「切了没生效」。
+//   编辑器自己切风格时也要走这里，否则设置页不会跟着变。
+function broadcastUiTheme(theme) {
+  const value = theme === 'doodle' ? 'doodle' : 'glass';
+  // ⚠️ 演示窗口也要在列表里 —— 它现在也支持双主题了。
+  //   漏了的话，用户在设置页切风格，演示窗口还停在旧样子。
+  for (const win of [settingsWindow, skinEditorWindow, contextMenuWindow, demoWindow]) {
+    if (win && !win.isDestroyed()) win.webContents.send('ui:theme-changed', value);
+  }
+}
+
+// 编辑器存「界面风格」用的独立通道。
+//
+// ⚠️ 为什么不能直接用 settings:save-config：
+//   那个通道的语义是「设置页保存完毕，把设置窗口关掉」—— 它会
+//   主动 settingsWindow.close()。编辑器只是顺手改一个配置项，
+//   要是复用了它，用户正开着设置页就会莫名其妙被关掉。
+//
+// ⚠️ 为什么不用 applyConfig：
+//   applyConfig 会连带做一堆事 —— 重建输入钩子、改桌宠尺寸和透明度、
+//   重测保密模式、改开机自启。编辑器换个界面风格跟这些**毫无关系**，
+//   全都跑一遍既浪费又有副作用（比如桌宠突然闪一下）。
+//   所以这里只做「合并配置 + 存盘」这一件事。
+ipcMain.on('skin-editor:save-config', (_event, next) => {
+  if (!next || typeof next !== 'object') return;
+  // 只认编辑器自己关心的那个键 —— 别的一概不碰。
+  const theme = next.skinUi === 'doodle' ? 'doodle' : 'glass';
+  if (config.skinUi === theme) return;   // 没变就别写盘
+  config = { ...config, skinUi: theme };
+  saveConfig();
+  // 编辑器改了风格，设置页和右键菜单也要跟着变。
+  broadcastUiTheme(theme);
+});
+
 ipcMain.on('settings:close', () => {
   if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.close();
 });
@@ -1040,6 +1489,30 @@ ipcMain.on('settings:reset-position', () => {
     const { width, height } = petSize();
     const pos = defaultPosition(width, height);
     petWindow.setPosition(pos.x, pos.y);
+  }
+});
+
+// 全局输入后端状态。设置页用它显示「全局跟随为什么没反应」。
+ipcMain.on('input:get-status', event => {
+  event.returnValue = inputBackend.status();
+});
+
+// 打开系统的权限设置页。
+//
+// macOS 上 CGEventTap 必须有「辅助功能」授权才能读到全局键鼠，
+// 而这个开关应用没法替用户点 —— 只能把用户送到系统设置页。
+//
+// macOS 13+ 用 x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility，
+// 12 及更早用 Privacy_Accessibility（同一个 pane）。
+// Linux 上没有对应机制（X11 不需要授权），所以不处理。
+ipcMain.on('input:open-permission-settings', () => {
+  if (process.platform !== 'darwin') return;
+  try {
+    shell.openExternal(
+      'x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility');
+  } catch (err) {
+    debugLog('failed to open accessibility settings: ' +
+      (err && err.message ? err.message : err));
   }
 });
 
@@ -1125,6 +1598,52 @@ function watchDisplayChanges() {
 }
 
 // ---------- 生命周期 ----------
+
+// ---------- 单实例锁 ----------
+
+// ⚠️ 启动早期日志（诊断用，可保留）。
+//   便携版自解压到 %TEMP% 随机目录后启动，路径每次都不同 ——
+//   这里把可执行路径 / 是否拿到锁记下来，
+//   排查「托盘图标增殖」「便携版起不来」这类问题时第一手要看它。
+//
+// ⚠️ 注意：**不要**调 app.getAppUserModelId() —— Electron 没有这个 API，
+//   调了会让整个应用在 load 阶段就抛错退出（而且没有堆栈到用户眼前，
+//   表现为「双击没反应」）。要读 AUMID 只能从 Windows 注册表侧看。
+debugLog('boot: execPath=' + process.execPath +
+  ' portable=' + (process.env.PORTABLE_EXECUTABLE_FILE || 'no'));
+
+// ⚠️ 为什么必须加：
+//   桌宠是个「后台常驻」的程序，但用户很容易手滑双击便携版。
+//   没有锁的时候每多开一个，就多一个进程、多个全局键盘钩子、
+//   多个鼠标穿透轮询 —— 它们会互相抢钩子，表现出来就是
+//   「猫时灵时不灵」「鼠标穿透时灵时不灵」。
+//   （实测同时跑过 5 个「小叽.exe」进程。）
+//
+// 行为：第二个实例启动时立刻退出，并把已有实例的桌宠叫出来亮个相。
+// 用户体感 = 「双击了一下，猫闪了一下」，不会出现两个猫。
+//
+// ⚠️ requestSingleInstanceLock() 必须在 app ready 之前调用。
+//   返回 false = 已经有实例在跑，本进程应该立刻退出。
+const gotLock = app.requestSingleInstanceLock();
+debugLog('boot: gotLock=' + gotLock);
+if (!gotLock) {
+  // 已经有实例了 —— 本进程什么都不做，直接退。
+  debugLog('another instance is already running, exiting');
+  app.exit(0);
+} else {
+  // 本进程是「第一个」实例。第二个实例启动时，
+  // 它会通过 second-instance 事件通知到这里。
+  app.on('second-instance', () => {
+    debugLog('second instance launched, showing existing pet');
+    if (petWindow && !petWindow.isDestroyed()) {
+      // 猫如果被隐藏了（用户点了托盘收起），就把它叫回来。
+      if (!petWindow.isVisible()) petWindow.show();
+      // 桌宠窗口不能抢焦点（否则用户在密码框里没法打字），
+      // 所以只 show，不 focus。
+    }
+  });
+}
+
 app.whenReady().then(() => {
   debugLog('app ready userData=' + app.getPath('userData') +
     ' globalKeys=' + config.globalKeys + ' globalMouse=' + config.globalMouse +
@@ -1144,6 +1663,8 @@ app.whenReady().then(() => {
   } catch (err) {
     debugLog('tray failed: ' + err.message);
   }
+  // 轮询 Windows 托盘可见性开关 —— 用户在系统设置里拨了开关就自动生效。
+  startTrayPoll();
   registerShortcuts();
   applyLoginItem();
 });
@@ -1153,9 +1674,25 @@ app.on('window-all-closed', () => { /* 托盘常驻，不退出 */ });
 app.on('activate', () => {
   if (petWindow && !petWindow.isDestroyed() && !petWindow.isVisible()) petWindow.show();
 });
+
+// Windows 资源管理器重启后，托盘图标会**整个消失** ——
+// 因为图标是注册给 Explorer 进程的，Explorer 一重启，之前的注册就没了。
+// TaskbarCreated 是 Explorer 通知你「任务栏又建好了」的事件，
+// 这时候重新注册一次，图标就回来了。
+//
+// ⚠️ 这个事件只有 Windows 有，其他平台监听它没有任何副作用。
+app.on('TaskbarCreated', () => {
+  debugLog('TaskbarCreated — re-registering tray icon');
+  if (tray && !tray.isDestroyed()) {
+    try { tray.destroy(); } catch (_) {}
+    tray = null;
+  }
+  try { createTray(); } catch (err) { debugLog('tray re-create failed: ' + err.message); }
+});
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   stopInputHook();
   stopSecretProbe();
   stopIgnorePolling();
+  if (_trayPollTimer) { clearInterval(_trayPollTimer); _trayPollTimer = null; }
 });

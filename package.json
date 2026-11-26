@@ -34,19 +34,21 @@
     ],
     "files": [
       "main.js",
-      "native-hook.js",
+      "input/**/*",
       "password-probe.js",
       "preload.js",
       "pet.html",
       "pet.js",
       "settings.html",
       "settings.js",
+      "menu.html",
+      "menu.js",
+      "menu-preload.js",
       "skin-editor.html",
       "editor.js",
       "index.html",
       "app.js",
       "assets/**/*",
-      "!keyboard-hook.js",
       "!node_modules/@mukea/**",
       "!resources/**"
     ],
@@ -61,6 +63,13 @@
       {
         "from": "resources/hook/node_modules/@koromix/koffi-win32-x64",
         "to": "hook/node_modules/@koromix/koffi-win32-x64",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "resources/hook/node_modules/@mukea/uiohook-napi",
+        "to": "hook/node_modules/@mukea/uiohook-napi",
         "filter": [
           "**/*"
         ]

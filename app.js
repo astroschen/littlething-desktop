@@ -176,6 +176,69 @@
     });
   }
 
+  // ---------- 界面风格（液态玻璃 / 卡通涂鸦） ----------
+  //
+  // 演示窗口跟设置窗口、皮肤编辑器、右键菜单用同一套主题变量
+  // （assets/ui-theme-vars.css），所以这里只需要打属性。
+  //
+  // ⚠️ 三处属性，缺一不可：
+  //   <html>   → 给共享变量用（:root[data-skin-ui] 就是 --b-* / --c-* 的定义处）
+  //   <body>   → 给页面背景用（主题层的选择器是 :root[data-skin-ui] body，
+  //              但 body 自己也要带上，方便页面内的其它脚本判断）
+  //
+  // 演示页右上角的风格切换器（跟设置窗口、皮肤编辑器里的是同一个）。
+  const uiSwitch = document.getElementById('uiSwitch');
+
+  // 漏掉 <html> 的话，变量一条都取不到 —— 主题看着「切了没反应」，
+  // 而且**不报错**。这个坑踩过。
+  function applyUiTheme(theme) {
+    const id = theme === 'doodle' ? 'doodle' : 'glass';
+    document.documentElement.setAttribute('data-skin-ui', id);
+    document.body.setAttribute('data-skin-ui', id);
+    if (uiSwitch) {
+      uiSwitch.querySelectorAll('.ui-btn').forEach(b => {
+        b.setAttribute('aria-pressed', String(b.dataset.theme === id));
+      });
+    }
+    return id;
+  }
+
+  if (uiSwitch) {
+    uiSwitch.addEventListener('click', e => {
+      const btn = e.target.closest('.ui-btn');
+      if (!btn) return;
+      const id = applyUiTheme(btn.dataset.theme);
+      // 立刻存 —— 跟设置窗口、皮肤编辑器一个路子：
+      // 风格是「看到什么」而不是「做了什么」，切了就该记住。
+      if (window.petAPI && window.petAPI.saveUiTheme) window.petAPI.saveUiTheme(id);
+    });
+  }
+
+  // 初始风格：跟着上次存的那套走，默认液态玻璃。
+  //
+  // ⚠️ URL 参数优先 —— 主进程加载时把当前风格写进了 ?theme=xxx。
+  //   applyUiTheme 是在脚本执行时跑的，而脚本在 <body> 之后加载 ——
+  //   浏览器已经画过第一帧了（玻璃色的窗口闪一下才变成涂鸦）。
+  //   URL 参数让 <html> 的静态属性一开始就是对的。
+  let initialTheme = 'glass';
+  try {
+    const cfg0 = window.petAPI && window.petAPI.getConfig ? window.petAPI.getConfig() : null;
+    if (cfg0 && cfg0.skinUi === 'doodle') initialTheme = 'doodle';
+  } catch (_) {}
+  try {
+    const q = new URLSearchParams(location.search).get('theme');
+    if (q === 'doodle' || q === 'glass') initialTheme = q;
+  } catch (_) {}
+  applyUiTheme(initialTheme);
+
+  // 别的窗口（设置页 / 皮肤编辑器）改了界面风格，演示窗口要跟着换。
+  //
+  // ⚠️ 这里只改外观，不往回存 —— 那个风格主进程已经存过了，
+  //   再存一遍会引发「广播 → 又广播」的回环。
+  if (window.petAPI && window.petAPI.onUiThemeChanged) {
+    window.petAPI.onUiThemeChanged(theme => applyUiTheme(theme));
+  }
+
   document.getElementById('show-keyboard').addEventListener('change', e => {
     cat.setOptions({ showKeyboard: e.target.checked });
   });

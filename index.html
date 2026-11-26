@@ -1,136 +1,34 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-skin-ui="glass">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>小叽</title>
-<style>
-  :root {
-    --sun: #ffd978;
-    --sun-deep: #f9bf5a;
-    --ink: #17171b;
-    --ink-soft: #4b4636;
-    --key: #fffdf4;
-    --press: #ef7d2d;
-    --display: ui-rounded, "SF Pro Rounded", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-    --body: system-ui, -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Segoe UI", sans-serif;
-  }
-  * { box-sizing: border-box; }
-  html { background: var(--sun); }
-  body {
-    margin: 0;
-    color: var(--ink);
-    font: 16px/1.65 var(--body);
-    background: linear-gradient(180deg, var(--sun) 0, var(--sun) 520px, var(--sun-deep) 100%);
-    min-height: 100vh;
-  }
-  .wrap { max-width: 980px; margin: 0 auto; padding: 24px 20px 48px; }
-  header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
-  /* 品牌区：logo + 标题并排 */
-  .brand { display: flex; align-items: center; gap: 13px; min-width: 0; }
-  .brand .logo { width: 48px; height: 48px; flex: none; }
-  h1 { font: 700 clamp(26px, 4vw, 40px)/1.15 var(--display); margin: 0; }
-  .tag { font: 600 13px/1 var(--body); color: var(--ink-soft); background: rgba(23,23,27,.08); padding: 8px 12px; border-radius: 999px; }
-  .grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(280px, .65fr); gap: 22px; align-items: start; }
-  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
 
-  .stage-card {
-    position: relative;
-    background: var(--sun);
-    border: 2px solid var(--ink);
-    border-radius: 22px;
-    box-shadow: 0 6px 0 rgba(23,23,27,.18);
-    overflow: hidden;
-  }
-  #stage {
-    position: relative;
-    width: 100%;
-    aspect-ratio: 400 / 340;
-    touch-action: none;
-    cursor: grab;
-    background: transparent;
-  }
-  #stage:active { cursor: grabbing; }
-  #stage canvas { display: block; width: 100%; height: 100%; }
-  .try {
-    position: absolute;
-    left: 8px;
-    top: 6px;
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    background: var(--key);
-    border: 2px solid var(--ink);
-    border-radius: 10px;
-    padding: 4px 10px;
-    font: 600 14px var(--display);
-    box-shadow: 0 3px 0 var(--ink);
-    pointer-events: none;
-    z-index: 5;
-  }
-  .try kbd { font: inherit; background: var(--ink); color: var(--key); border-radius: 5px; padding: 0 6px; }
-  .chip {
-    position: absolute;
-    transform: translate(-50%, -100%);
-    padding: 0 6px;
-    border-radius: 6px;
-    background: var(--key);
-    border: 1.5px solid var(--ink);
-    color: var(--ink);
-    font: 700 13px var(--display);
-    pointer-events: none;
-    transition: opacity .2s;
-    z-index: 4;
-  }
-  .zzz { position: absolute; pointer-events: none; display: none; font-family: var(--display); font-weight: 700; color: var(--ink); z-index: 3; }
-  .zzz span { position: absolute; left: 0; top: 0; opacity: 0; font-size: 1em; line-height: 1; transform-origin: 0 100%; animation: zfloat 3.3s linear infinite; }
-  .zzz span:nth-child(2) { animation-delay: 1.1s; }
-  .zzz span:nth-child(3) { animation-delay: 2.2s; }
-  @keyframes zfloat {
-    0% { opacity: 0; transform: translate(0, 0) scale(.28); }
-    12% { opacity: 1; }
-    70% { opacity: 1; }
-    100% { opacity: 0; transform: translate(1.4em, -2.6em) scale(1); }
-  }
-  @media (prefers-reduced-motion: reduce) { .zzz span { animation: none; opacity: 1; } }
+<!-- ⚠️ 这段内联脚本要放在**样式表之前** ——
+     主题属性必须在第一帧渲染前就设好。
+     主进程加载这个页面时把当前风格写进了 ?theme=glass / ?theme=doodle，
+     这里读出来打到 <html> 上。
+     放在 <body> 末尾的 app.js 里做同样的事就晚了 —— 那时浏览器
+     已经画过第一帧，用户会看到窗口闪一下玻璃色才跳成涂鸦。 -->
+<script>
+  (function () {
+    try {
+      var q = new URLSearchParams(location.search).get('theme');
+      document.documentElement.setAttribute('data-skin-ui',
+        q === 'doodle' ? 'doodle' : 'glass');
+    } catch (_) {}
+  })();
+</script>
 
-  .panel { background: var(--key); border: 2px solid var(--ink); border-radius: 18px; padding: 16px; box-shadow: 0 5px 0 rgba(23,23,27,.16); }
-  .panel h2 { font: 700 16px/1.3 var(--display); margin: 0 0 10px; }
-  .panel + .panel { margin-top: 14px; }
-  .status { display: grid; grid-template-columns: 4.5em 1fr; gap: 4px 10px; font-size: 14px; }
-  .status b { color: var(--ink-soft); font-weight: 600; }
-  #state { font-weight: 700; color: var(--press); }
-  #keys { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; word-break: break-all; }
-  .row { display: flex; flex-wrap: wrap; gap: 8px; }
-  button {
-    font: 600 14px var(--body);
-    color: var(--ink);
-    background: #fff;
-    border: 2px solid var(--ink);
-    border-radius: 10px;
-    padding: 6px 11px;
-    cursor: pointer;
-    box-shadow: 0 3px 0 rgba(23,23,27,.18);
-  }
-  button:hover { background: #fff8dc; }
-  button:active { transform: translateY(2px); box-shadow: 0 1px 0 rgba(23,23,27,.18); }
-  button[aria-pressed="true"] { background: var(--ink); color: var(--key); box-shadow: none; }
-  button:focus-visible { outline: 3px solid var(--press); outline-offset: 2px; }
-  label.toggle { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; font-size: 14px; cursor: pointer; }
-  label.toggle input { accent-color: var(--ink); width: 17px; height: 17px; }
-  .sw { display: inline-block; width: 11px; height: 11px; border-radius: 50%; border: 1px solid var(--ink); margin-right: 5px; vertical-align: -1px; }
-  .hint { font-size: 13px; color: var(--ink-soft); margin: 10px 0 0; }
-  .legend { margin-top: 16px; font-size: 14px; color: var(--ink-soft); }
-  .legend strong { color: var(--ink); }
-  .error { display: none; padding: 12px; background: #ffe1d5; border: 2px solid #b5432a; border-radius: 12px; margin-bottom: 14px; }
-  [hidden] { display: none !important; }
-
-  /* ---------- 用户自己的皮肤列表 ---------- */
-  .skin-my-list { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
-  .skin-my-list .row { margin: 0; }
-</style>
+<!-- 全局共享的主题变量（设置窗口 / 皮肤编辑器 / 右键菜单也用这一份） -->
+<link rel="stylesheet" href="./assets/ui-theme-vars.css">
+<!-- 结构层：只管布局 -->
+<link rel="stylesheet" href="./assets/demo-core.css">
+<!-- 主题层：液态玻璃 / 卡通涂鸦两套，按 data-skin-ui 属性门控 -->
+<link rel="stylesheet" href="./assets/demo-themes.css">
 </head>
-<body>
+<body data-skin-ui="glass">
 <div class="wrap">
   <header>
     <div class="brand">
@@ -139,7 +37,31 @@
       <img class="logo" src="./assets/icons/logo.png" alt="小叽 logo">
       <h1>小叽</h1>
     </div>
-    <span class="tag">离线运行 · 键盘 / 鼠标 / 摸头 / 睡觉</span>
+    <div class="head-right">
+      <span class="tag">离线运行 · 键盘 / 鼠标 / 摸头 / 睡觉</span>
+      <!-- 界面风格：跟设置窗口、皮肤编辑器里的是同一个切换器。 -->
+      <span class="ui-switch" id="uiSwitch" role="group">
+        <button class="ui-btn" type="button" data-theme="glass"
+                aria-label="液态玻璃风格" aria-pressed="true" title="液态玻璃风格">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <rect x="3" y="3" width="18" height="18" rx="5" fill="currentColor" opacity=".18"/>
+            <rect x="3" y="3" width="18" height="18" rx="5" stroke="currentColor" stroke-width="1.6"/>
+            <path d="M3 9h18" stroke="currentColor" stroke-width="1.6"/>
+            <circle cx="7.5" cy="6" r="1.2" fill="currentColor"/>
+          </svg>
+        </button>
+        <button class="ui-btn" type="button" data-theme="doodle"
+                aria-label="卡通涂鸦风格" aria-pressed="false" title="卡通涂鸦风格">
+          <svg class="ico" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M4 17c2-6 4-9 8-9s6 3 8 9" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round"/>
+            <path d="M7 19c1.5-2 3-3 5-3s3.5 1 5 3" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" opacity=".55"/>
+            <circle cx="8" cy="8" r="2" fill="currentColor"/>
+          </svg>
+        </button>
+      </span>
+    </div>
   </header>
 
   <div id="error" class="error">
@@ -198,13 +120,13 @@
         <p class="hint" style="margin:0 0 10px">在密码框里打字：小猫会扭头看向<b>反方向</b>装作没看见；停手几秒它会<b>偷偷</b>瞥一眼密码框；你一继续打，它马上又转回去。</p>
         <label class="toggle" style="display:block;margin-bottom:8px"><input id="secret-on" type="checkbox" checked> 启用保密模式</label>
         <label class="row" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:4px 0"><span style="font-weight:600;font-size:14px">密码框位置</span>
-          <select id="secret-dir" style="font:inherit;padding:5px 8px;border:2px solid var(--ink);border-radius:8px;background:#fff">
+          <select id="secret-dir" class="demo-select">
             <option value="1">在猫的右边</option>
             <option value="-1">在猫的左边</option>
           </select>
         </label>
         <label class="row" style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:4px 0"><span style="font-weight:600;font-size:14px">试试看</span>
-          <input type="password" placeholder="在这里输密码" autocomplete="off" style="font:inherit;padding:5px 8px;border:2px solid var(--ink);border-radius:8px;background:#fff;width:150px">
+          <input type="password" id="demo-pw" placeholder="在这里输密码" autocomplete="off" class="demo-input">
         </label>
         <p class="hint">当前表演：<b id="secret-state">未进入</b></p>
       </div>

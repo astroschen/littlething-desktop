@@ -8,7 +8,14 @@
     language: 'zh',
     coat: 'jiba', skinId: '', showKeyboard: true, showMouse: true, leftMouse: false,
     sleepMinutes: 2, autoDemo: false, globalKeys: true, globalMouse: true, opacity: 1, scale: 1,
-    alwaysOnTop: true, autoLaunch: false, allowDrag: true, secretMode: true, position: null
+    alwaysOnTop: true, autoLaunch: false, allowDrag: true, secretMode: true, position: null,
+    // 「允许鼠标躁动」默认**关闭**。
+    //
+    // 旧实现里手边的鼠标一直在抽搐（桌面端全局鼠标钩子是 60Hz 高频事件，
+    // 每次都叠加随机扰动，来不及衰减就又叠加下一次）。
+    // 那个效果本身挺可爱，所以保留下来做成开关，但默认不开 ——
+    // 开箱第一眼不该是「鼠标在抖」。
+    mouseJitter: false, mouseJitterAmount: 0.5
   };
   let config = { ...DEFAULT, ...(api.getConfig() || {}) };
 
@@ -78,7 +85,10 @@
       showMouse: config.showMouse,
       followKeys: true,
       leftMouse: config.leftMouse,
-      sleepMinutes: config.sleepMinutes
+      sleepMinutes: config.sleepMinutes,
+      // 「允许鼠标躁动」：开关 + 强度（存 0..1）。
+      mouseJitter: !!config.mouseJitter,
+      mouseJitterAmount: config.mouseJitterAmount
     });
   }
   applyConfig(config);

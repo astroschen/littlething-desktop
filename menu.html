@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN" data-skin-ui="glass">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小叽 · 菜单</title>
+
+<!-- ⚠️ 这段内联脚本要放在**样式表之前** ——
+     主题属性必须在第一帧渲染前就设好。
+     主进程加载这个页面时把当前风格写进了 ?theme=glass / ?theme=doodle。
+     菜单是用 IPC 推主题的话，推的时候窗口已经 show 了 ——
+     用户会看到菜单先以玻璃色闪一下才变成涂鸦。 -->
+<script>
+  (function () {
+    try {
+      var q = new URLSearchParams(location.search).get('theme');
+      document.documentElement.setAttribute('data-skin-ui',
+        q === 'doodle' ? 'doodle' : 'glass');
+    } catch (_) {}
+  })();
+</script>
+
+<!-- 全局共享的主题变量（设置页 / 皮肤编辑器也用这一份） -->
+<link rel="stylesheet" href="./assets/ui-theme-vars.css">
+<!-- 结构层：只管布局 -->
+<link rel="stylesheet" href="./assets/menu-core.css">
+<!-- 主题层：两套视觉语言，按 data-skin-ui 属性门控 -->
+<link rel="stylesheet" href="./assets/menu-themes.css">
+
+<style>
+  /* 菜单窗口本身是透明的 —— 圆角和阴影交给里面的 .menu 面板画。
+     窗口尺寸由主进程按菜单项数算好，这里不参与布局。 */
+  html, body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    /* 菜单不该被选中 —— 拖着选字很难看 */
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  /* 兜底底色：万一共享变量没加载上，菜单还是能看见 */
+  body:not([data-skin-ui]) { background: rgba(255, 255, 255, .9); }
+</style>
+</head>
+<body data-skin-ui="glass">
+  <div class="menu" id="menu" role="menu"></div>
+  <script src="./menu.js"></script>
+</body>
+</html>
