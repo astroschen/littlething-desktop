@@ -47,12 +47,20 @@ for (const t of targets) {
 }
 
 // 便携版 exe 也要先挪走：直接覆盖会被 EBUSY 拒绝（文件正被扫描或占用）。
-for (const f of fs.readdirSync(dist)) {
-  if (/^小叽 .*\.exe$/.test(f) && !/Setup/.test(f)) {
-    const src = path.join(dist, f);
-    const dst = path.join(dist, '..', '_old_' + f);
-    try { fs.renameSync(src, dst); console.log('moved aside:', f); } catch (e) {
-      console.log('could not move aside (will be overwritten):', f);
+//
+// 名字要同时认两种：
+//   - `小叽 x.x.x.exe`        —— 旧的默认命名（productName 是中文时 electron-builder 生成的）
+//   - `LittleThing-x.x.x.exe` —— 现在 package.json 里 artifactName 固定的 ASCII 名
+// 只认旧名字的话，换成新命名后便携版就挪不走，下一次打包会撞上 EBUSY。
+if (fs.existsSync(dist)) {
+  for (const f of fs.readdirSync(dist)) {
+    const isPortableExe = /^小叽 .*\.exe$/.test(f) || /^LittleThing-.*\.exe$/.test(f);
+    if (isPortableExe && !/Setup/.test(f)) {
+      const src = path.join(dist, f);
+      const dst = path.join(dist, '..', '_old_' + f);
+      try { fs.renameSync(src, dst); console.log('moved aside:', f); } catch (e) {
+        console.log('could not move aside (will be overwritten):', f);
+      }
     }
   }
 }

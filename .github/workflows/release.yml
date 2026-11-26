@@ -1,0 +1,105 @@
+name: Release
+
+# 打 tag 即发布：三个平台各跑一个 job，产物汇总后由 release job 挂到同一条 Release 上。
+#
+# 为什么用 CI 而不是本地构建：
+#   - macOS 的 dmg 只能在 macOS 上打（hdiutil），Linux 的 deb/AppImage
+#     也需要 Linux 环境，交叉构建不可靠；
+#   - uiohook-napi 的预编译产物按平台分发，Linux 那个是 glibc 版本，
+#     在 Linux runner 上打包才不会出现运行库不匹配。
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# 同一个 tag 只允许跑一次发布流程，避免重复覆盖 Release 上的附件。
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  # CI runner 在 GitHub 自己的机房里，直连 GitHub Release 官方源比绕国内镜像快得多，
+  # 也不受镜像站对境外 IP 的限速影响。
+  # 本地构建仍然走 npmmirror（见 scripts/build.js 和 scripts/ensure-electron.js）。
+  ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
+  ELECTRON_BUILDER_BINARIES_MIRROR: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # 一个平台挂了不影响其它平台，最后由 release job 决定发不发。
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            command: pnpm build:win
+          - name: macOS
+            os: macos-latest
+            command: pnpm build:mac
+          - name: Linux
+            os: ubuntu-latest
+            command: pnpm build:linux
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: ${{ matrix.command }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          # 只收真正要给用户下载的安装包。
+          # latest.yml / *.blockmap 是 electron-updater 的元数据，本项目没有接自动更新，
+          # 附上去只会让人误以为点一下就能升级。
+          path: |
+            dist/*.exe
+            dist/*.dmg
+            dist/*.AppImage
+            dist/*.deb
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: 小叽 桌面版 ${{ github.ref_name }}
+          # 先用 GitHub 自动生成的提交列表占位，发布说明随后用 gh CLI 覆盖成中文版本。
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/*.exe
+            artifacts/*.dmg
+            artifacts/*.AppImage
+            artifacts/*.deb

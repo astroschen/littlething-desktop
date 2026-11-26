@@ -55,7 +55,7 @@
 | 平台 | 最小版本 | 状态 |
 |---|---|---|
 | **Windows** | 10 / 11 | ✅ 完整支持（键鼠跟随走 Win32 低层钩子，无需额外授权） |
-| **macOS** | 12+ | ⚠️ 可运行，全局跟随需在「系统设置 → 隐私与安全性 → 辅助功能」里授权 |
+| **macOS** | 12+（Apple Silicon） | ⚠️ 可运行，全局跟随需在「系统设置 → 隐私与安全性 → 辅助功能」里授权 |
 | **Linux** | — | ⚠️ X11 可用；**Wayland 会话不支持**（系统安全模型限制，无法绕过） |
 
 > **Windows 7 不支持。** 键盘钩子走的是 `WH_KEYBOARD_LL`，
@@ -164,23 +164,49 @@ pnpm start
 
 从 [Releases](https://github.com/astroschen/littlething-desktop/releases) 下载：
 
+**Windows**（x64）
+
 - `LittleThing-Setup-x.x.x.exe` —— 安装版，带开机自启和开始菜单
 - `LittleThing-x.x.x.exe` —— 便携版，双击即用，绿色无残留
+
+**macOS**（Apple Silicon / arm64）
+
+- `LittleThing-x.x.x-arm64.dmg` —— 拖进「应用程序」即可
+
+**Linux**（x64）
+
+- `LittleThing-x.x.x-x64.AppImage` —— 免安装，`chmod +x` 后直接运行
+- `LittleThing-x.x.x-x64.deb` —— Debian / Ubuntu 安装包
 
 > 下载文件名用的是英文 `LittleThing` 而不是「小叽」：GitHub 的 Release 附件名
 > 会把非 ASCII 字符和空格剥掉，中文名上传后会被改成 `Setup.x.x.x.exe` 这种
 > 莫名其妙的字符串。构建配置里的 `artifactName` 已经固定成英文名，产物名和
 > 上传后的名字保持一致。
 
+> **macOS 只有 Apple Silicon 版本。** 全局输入钩子用的 `uiohook-napi`
+> 只提供 `darwin-arm64` 一个预编译产物，Intel Mac 没有对应的原生模块。
+> Intel Mac 暂时只能用 Rosetta 跑不了原生版 —— 等上游补出 `darwin-x64`
+> 再说。
+
+> **macOS 首次打开需要手动放行。** 应用没有 Apple 开发者签名，
+> Gatekeeper 会拦下来。右键点图标选「打开」，或者终端里执行：
+> ```bash
+> xattr -cr /Applications/小叽.app
+> ```
+
 ## 构建
 
 ```bash
 pnpm build:win     # Windows：NSIS 安装版 + 便携版
-pnpm build:mac     # macOS：universal dmg
+pnpm build:mac     # macOS：dmg（仅 arm64 / Apple Silicon）
 pnpm build:linux   # Linux：AppImage + deb
 ```
 
 产物落在 `dist/`。
+
+> macOS 的 dmg 只能在 macOS 上打，Linux 的 deb / AppImage 也需要 Linux 环境，
+> 所以跨平台发布走 CI（`.github/workflows/release.yml`）：
+> 打 `v*` tag → 三个平台各跑一个 job → 产物自动汇总到同一条 Release。
 
 构建脚本默认走**国内镜像**（`npmmirror.com`），避免直连 GitHub 下载 electron-builder
 二进制超时。需要换源时设置环境变量即可：

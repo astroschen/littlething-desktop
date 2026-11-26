@@ -1,6 +1,6 @@
 {
   "name": "littlething-cat-desktop",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "小叽 3D 小猫桌面版 - Electron 封装",
   "author": "LittleThing Local",
   "main": "main.js",
@@ -94,11 +94,12 @@
     },
     "mac": {
       "category": "public.app-category.entertainment",
+      "icon": "build/icon/icon-512.png",
       "target": [
         {
           "target": "dmg",
           "arch": [
-            "universal"
+            "arm64"
           ]
         }
       ]
