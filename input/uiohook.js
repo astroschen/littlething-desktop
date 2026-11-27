@@ -64,18 +64,55 @@ function buildKeyMap(UiohookKey) {
 
 let runtime = null;
 
+// 加载 uiohook-napi。
+//
+// ⚠️ 这里有两个坑，踩中任何一个都是「全局键鼠完全没反应」，
+// 而且都不会在开发态复现（只在打包后出现），极难排查：
+//
+// 1. **绝对路径 require 不认 package.json 的 "exports"。**
+//    Node 的 CJS 解析器处理「目录路径」时只找 package.json 的 "main"
+//    （或根目录的 index.js），只有「包名」解析才会读 "exports"。
+//    而 @mukea/uiohook-napi 恰好**既没有 "main" 也没有根目录 index.js**
+//    —— 它的入口是 "exports" 指向的 ./dist/index.js。
+//    所以 require('<绝对路径>/@mukea/uiohook-napi') 必然 MODULE_NOT_FOUND，
+//    哪怕 dist/ 就在旁边。
+//
+// 2. **打包后 app.asar 里根本没有这个包。**
+//    package.json 的 build.files 里写了 "!node_modules/@mukea/**"，
+//    它是通过 extraResources 落到 Resources/hook/node_modules 下的，
+//    asar 内部没有 → require('@mukea/uiohook-napi') 在打包态必然解析失败。
+//
+// 所以打包态必须用 createRequire 把解析根**锚到 hookDir/node_modules**：
+// 这样既能命中那个目录，又能让 Node 正确读取 "exports"。
 function loadUiohook(hookDir) {
-  // 打包后模块位于 resources/hook/node_modules。
-  // 优先走常规解析，失败时再用相对于 hookDir 的绝对路径，
-  // 避免 NODE_PATH 被宿主环境干扰。
-  const candidates = [
-    () => require('@mukea/uiohook-napi'),
-    () => require(path.join(hookDir, 'node_modules', '@mukea', 'uiohook-napi'))
-  ];
-  let lastErr = null;
-  for (const attempt of candidates) {
+  const attempts = [];
+
+  // 开发态：根 node_modules 里就有这个包，按包名直接解析。
+  attempts.push(() => require('@mukea/uiohook-napi'));
+
+  if (hookDir) {
+    // 打包态：把解析根锚到 Resources/hook/node_modules。
+    const anchor = path.join(hookDir, 'node_modules', '__uiohook_resolver__.js');
     try {
-      return attempt();
+      const scopedRequire = require('module').createRequire(anchor);
+      attempts.push(() => scopedRequire('@mukea/uiohook-napi'));
+    } catch (_) { /* 忽略，走下面的显式路径兜底 */ }
+
+    // 最后兜底：直接按 "exports" 指向的文件 require。
+    // 绝对路径不吃 "exports"，所以这里必须显式拼出文件路径。
+    for (const entry of ['index.js', 'index.cjs']) {
+      attempts.push(() => require(path.join(
+        hookDir, 'node_modules', '@mukea', 'uiohook-napi', 'dist', entry
+      )));
+    }
+  }
+
+  let lastErr = null;
+  for (const attempt of attempts) {
+    try {
+      const mod = attempt();
+      if (mod && mod.uIOhook) return mod;
+      lastErr = new Error('uiohook-napi 导出内容异常');
     } catch (err) {
       lastErr = err;
     }
@@ -93,15 +130,20 @@ function start(opts) {
     return { ok: false, error: '没有订阅任何输入类型' };
   }
 
-  if (runtime) return { ok: true };
+  if (runtime) return { ok: true, stats: runtime.counters };
 
   let mod;
   try {
     mod = loadUiohook(hookDir);
   } catch (err) {
+    // 报错要带「找过哪些地方」——不然用户在 macOS 上只看到一句
+    // MODULE_NOT_FOUND，完全不知道该去查哪。
+    const where = hookDir
+      ? '（已尝试：包名解析、' + path.join(hookDir, 'node_modules', '@mukea', 'uiohook-napi') + '）'
+      : '';
     return {
       ok: false,
-      error: '无法加载 uiohook-napi: ' + (err && err.message || err)
+      error: '无法加载 uiohook-napi: ' + ((err && err.message) || err) + where
     };
   }
 
@@ -111,6 +153,12 @@ function start(opts) {
   // 长按去重用的按下时间表。
   const pressed = new Map();
   let lastMoveAt = 0;
+  // 认不出来的 scancode：每个只记一次，别刷屏。
+  // 出现这个说明「事件到了但键码对不上」——和「事件根本没到」是两回事，
+  // 排查时要能分开看。
+  const unknownKeys = new Set();
+  // 事件计数。用来判断「钩子到底有没有收到东西」。
+  const counters = { key: 0, mouse: 0 };
   // 记录监听器引用，stop 时要摘掉 —— uIOhook 是模块级单例，
   // 不摘干净的话下次 start 会重复绑定。
   const handlers = [];
@@ -120,9 +168,21 @@ function start(opts) {
     handlers.push([event, fn]);
   };
 
+  const resolveKey = (event) => {
+    const code = keyMap.get(event.keycode);
+    if (code) return code;
+    if (!unknownKeys.has(event.keycode)) {
+      unknownKeys.add(event.keycode);
+      console.warn('[uiohook] 未识别的按键 scancode:', event.keycode,
+        'rawcode:', event.rawcode);
+    }
+    return null;
+  };
+
   if (wantKeyboard) {
     on('keydown', event => {
-      const code = keyMap.get(event.keycode);
+      counters.key++;
+      const code = resolveKey(event);
       if (!code) return;
       // libuiohook 在按住期间会持续发 keydown（不像 Win32 只给「按下的那一刻」，
       // 也不像 Win32 那样带 keyup 丢失的自动重复语义），所以这里自己做去重：
@@ -135,7 +195,8 @@ function start(opts) {
     });
 
     on('keyup', event => {
-      const code = keyMap.get(event.keycode);
+      counters.key++;
+      const code = resolveKey(event);
       if (!code) return;
       pressed.delete(code);
       // keyup 总是往外发：渲染层的 held.delete 本身幂等；
@@ -146,16 +207,19 @@ function start(opts) {
 
   if (wantMouse) {
     on('mousedown', event => {
+      counters.mouse++;
       const button = mouseButton(event.button);
       if (button) emit({ type: 'mousedown', button });
     });
 
     on('mouseup', event => {
+      counters.mouse++;
       const button = mouseButton(event.button);
       if (button) emit({ type: 'mouseup', button });
     });
 
     on('mousemove', event => {
+      counters.mouse++;
       const now = Date.now();
       if (now - lastMoveAt < MOVE_THROTTLE_MS) return;
       lastMoveAt = now;
@@ -176,8 +240,8 @@ function start(opts) {
     };
   }
 
-  runtime = { uIOhook, handlers, pressed };
-  return { ok: true };
+  runtime = { uIOhook, handlers, pressed, counters };
+  return { ok: true, stats: counters };
 }
 
 function stop() {

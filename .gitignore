@@ -68,6 +68,18 @@ release/
 *.msi
 .omc
 
+# ⚠️ 例外：uiohook-napi 的 JS 入口必须进仓库。
+#
+# @mukea/uiohook-napi 的入口是 package.json 的 "exports" 字段指向的
+# ./dist/index.js —— 上面那条 dist/ 会把整个目录挡掉。
+#
+# 一旦漏掉，仓库里就只剩「预编译二进制、没有 JS 入口」的半个包：
+#   - 新 clone 下来的人 require 不动它；
+#   - CI 打出来的 macOS / Linux 安装包同样没有全局键鼠钩子。
+# 而且这个错只在运行时才暴露，install / build 阶段完全看不出来。
+!resources/hook/node_modules/@mukea/uiohook-napi/dist/
+!resources/hook/node_modules/@mukea/uiohook-napi/dist/**
+
 # Electron 缓存
 .electron/
 electron-builder-cache/

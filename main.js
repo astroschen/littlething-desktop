@@ -241,9 +241,46 @@ function writeSkins(text) {
   }
 }
 
+// 配置护栏：不管配置从哪来（配置文件 / 设置页 / 旧版本迁移过来的），
+// 都要先把关键字段的类型收拾干净。
+//
+// 之前是 {...config, ...next} 直接合并 —— 页面上或旧配置里
+// 任何一个字段类型不对（透明度传成字符串、位置带小数），
+// 后面 setOpacity() / setPosition() 当场就抛 gin 的 TypeError，
+// 而那是在 IPC 回调里 —— 没人接住的话，整个程序会弹错误框然后结束。
+function sanitizeConfig(raw) {
+  const out = { ...(raw && typeof raw === 'object' ? raw : {}) };
+  if ('opacity' in out) out.opacity = clampOpacity(out.opacity);
+  if ('scale' in out) out.scale = clampScale(out.scale);
+  if ('alwaysOnTop' in out) out.alwaysOnTop = toBool(out.alwaysOnTop, true);
+  if ('position' in out) out.position = normalizePosition(out.position);
+  if ('globalKeys' in out) out.globalKeys = toBool(out.globalKeys, true);
+  if ('globalMouse' in out) out.globalMouse = toBool(out.globalMouse, true);
+  if ('allowDrag' in out) out.allowDrag = toBool(out.allowDrag, true);
+  if ('secretMode' in out) out.secretMode = toBool(out.secretMode, true);
+  if ('autoLaunch' in out) out.autoLaunch = toBool(out.autoLaunch, false);
+  if ('debug' in out) out.debug = toBool(out.debug, false);
+  if ('mouseJitter' in out) out.mouseJitter = toBool(out.mouseJitter, false);
+  if ('skinUi' in out) out.skinUi = out.skinUi === 'doodle' ? 'doodle' : 'glass';
+  if ('skinId' in out) out.skinId = String(out.skinId || '');
+  if ('language' in out) out.language = out.language === 'en' ? 'en' : 'zh';
+  // 剩下的数值字段也顺手收敛一下 —— 它们最终会喂给渲染进程，
+  // 类型不对时表现是「滑杆跳变」之类的怪现象，而不是崩溃，但一样该挡。
+  if ('sleepMinutes' in out) out.sleepMinutes = Math.max(0, toNumber(out.sleepMinutes, 2));
+  if ('mouseJitterAmount' in out) out.mouseJitterAmount = clampOpacity(out.mouseJitterAmount);
+  if ('coat' in out) out.coat = String(out.coat || 'jiba');
+  // 这四个开关的默认值不一样（跟随默认开、鼠标惯用手/自动演示默认关），
+  // 所以兜底值按 DEFAULTS 里的约定来。
+  const boolDefaults = { showKeyboard: true, showMouse: true, leftMouse: false, autoDemo: false };
+  for (const key of Object.keys(boolDefaults)) {
+    if (key in out) out[key] = toBool(out[key], boolDefaults[key]);
+  }
+  return out;
+}
+
 function loadConfig() {
   try {
-    return { ...DEFAULTS, ...JSON.parse(fs.readFileSync(configFile(), 'utf8')) };
+    return sanitizeConfig({ ...DEFAULTS, ...JSON.parse(fs.readFileSync(configFile(), 'utf8')) });
   } catch (_) {
     // 应用改名后 userData 目录会跟着变；兼容旧版本，从同目录下其它
     // *-cat-desktop 目录里找出仍带 pet-config.json 的配置迁移过来，
@@ -255,7 +292,7 @@ function loadConfig() {
         if (name === current || !name.endsWith('-cat-desktop')) continue;
         const legacy = path.join(root, name, 'pet-config.json');
         if (!fs.existsSync(legacy)) continue;
-        const migrated = { ...DEFAULTS, ...JSON.parse(fs.readFileSync(legacy, 'utf8')) };
+        const migrated = sanitizeConfig({ ...DEFAULTS, ...JSON.parse(fs.readFileSync(legacy, 'utf8')) });
         try {
           fs.mkdirSync(path.dirname(configFile()), { recursive: true });
           fs.writeFileSync(configFile(), JSON.stringify(migrated, null, 2));
@@ -263,7 +300,7 @@ function loadConfig() {
         return migrated;
       }
     } catch (_) { /* 没有可迁移的旧配置时忽略 */ }
-    return { ...DEFAULTS };
+    return sanitizeConfig(DEFAULTS);
   }
 }
 
@@ -290,18 +327,183 @@ function debugLog(message) {
   }
 }
 
-function petSize() {
+// ---------- 兜底：桌宠不能因为一个异常就没了 ----------
+//
+// Electron 的默认行为是：主进程里任何未捕获异常 → 弹一个
+// 「A JavaScript error occurred in the main process」错误框 → 进程结束。
+// 对一个常驻桌面的装饰程序来说，这个代价太大了：
+// 用户只看到一句看不懂的英文，外加小猫凭空消失。
+//
+// 这里改成「记日志 + 继续活着」。日志写在
+// %TEMP%\littlething-pet-debug.log，排查时能拿到完整堆栈。
+process.on('uncaughtException', (err) => {
+  debugLog('uncaught exception: ' + (err && err.stack || err));
+  try { console.error(err); } catch (_) { /* 忽略 */ }
+});
+process.on('unhandledRejection', (reason) => {
+  debugLog('unhandled rejection: ' + (reason && reason.stack || reason));
+});
+
+// ---------- 数值护栏 ----------
+//
+// ⚠️ 这一段是被一个真实崩溃逼出来的：
+//
+//   「把最新打包版给别的用户跑 → 弹出
+//    A JavaScript error occurred in the main process
+//    TypeError: Error processing argument at index 1, conversion failure from」
+//
+// 那句话来自 Chromium 的 gin 绑定层（gin/arguments.cc）：
+// 它表示「传给原生 API 的第 2 个参数没能转换成目标类型」。
+// 实测把各种值喂给 BrowserWindow.setPosition() 就能复现：
+//
+//   setPosition(100, 1657.5) → index 1, conversion failure from（后面是空的）
+//   setPosition(100, NaN)    → index 1, conversion failure from
+//   setPosition(100, "1657") → index 1, conversion failure from 1657
+//   setPosition(100, 1657)   → 正常
+//
+// **窗口坐标只接受整数。** 而「为什么别人的机器上才炸」：
+// 屏幕缩放不是 100%（125% / 150%，或带分数缩放的多显示器）时，
+// 窗口位置换算成设备无关像素可能带小数；
+// getPosition() 原样把这个小数返回出来，拖动时 next.y = y + dy
+// 就成了小数 → setPosition 当场抛错 → 异常发生在 IPC 回调里，
+// 没人接住 → 弹错误框 + 主进程结束。
+//
+// 100% 缩放的机器上取到的全是整数，所以本地怎么试都复现不了。
+//
+// 修法：任何来源的坐标在进 Electron API 之前一律收敛成有限整数。
+
+// 把任意来源的值收敛成「有限整数」，不行就给兜底值。
+// 只认真数字和能转成数字的字符串 —— 空串、NaN、对象、undefined 一律走兜底。
+function toInt(value, fallback) {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? Math.round(value) : fallback;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const n = Number(value);
+    return Number.isFinite(n) ? Math.round(n) : fallback;
+  }
+  return fallback;
+}
+
+// 有限数（不取整）—— 透明度、缩放这类要保留小数的场合用。
+function toNumber(value, fallback) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : fallback;
+  if (typeof value === 'string' && value.trim() !== '') {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  }
+  return fallback;
+}
+
+// 布尔值。字符串要认得出「假」——
+// 单纯 !!'false' 是 true，会把「关掉保密模式」变成「开着」，
+// 这种反向的静默错误比崩溃更难查。
+function toBool(value, fallback) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const s = value.trim().toLowerCase();
+    if (s === '') return fallback;
+    if (s === 'false' || s === '0' || s === 'no' || s === 'off' || s === 'null' || s === 'undefined') return false;
+    if (s === 'true' || s === '1' || s === 'yes' || s === 'on') return true;
+    return fallback;
+  }
+  return fallback;
+}
+
+// 透明度：0..1。setOpacity() 收不了 NaN / 字符串。
+function clampOpacity(value) {
+  const n = toNumber(value, 1);
+  return Math.min(1, Math.max(0, n));
+}
+
+// 缩放：正数。setSize() / BrowserWindow 的宽高必须是整数。
+function clampScale(value) {
+  const n = toNumber(value, 1);
+  if (n <= 0) return 1;
+  return Math.min(3, n);
+}
+
+// 保存的位置：必须是整数对，否则拿到小数坐标就会在启动时炸掉。
+function normalizePosition(value) {
+  if (!value || typeof value !== 'object') return null;
+  const x = toInt(value.x, null);
+  const y = toInt(value.y, null);
+  if (x === null || y === null) return null;
+  return { x, y };
+}
+
+// 桌宠在屏幕上的**物理**尺寸（单位：屏幕像素）。
+//
+// 为什么不能直接拿 DIP 当准：窗口尺寸是按 DIP 给的，而 DIP 到物理像素
+// 的比例跟着系统缩放走。同样 420 DIP 的窗口，在 100% 屏上是 420 像素，
+// 在 200% 屏上是 840 像素 —— 猫在屏幕上直接大了一倍。
+// 用户看到的是屏幕上的实际大小，所以这里把物理尺寸记下来，
+// 系统缩放/分辨率一变就换算回去，保证猫看起来始终是同一个大小。
+let petPixels = null;
+
+// 桌宠窗口所在显示器的缩放比例（1 = 100%）。
+function petScaleFactor() {
+  try {
+    const d = (petWindow && !petWindow.isDestroyed())
+      ? screen.getDisplayMatching(petWindow.getBounds())
+      : screen.getPrimaryDisplay();
+    return d && d.scaleFactor ? d.scaleFactor : 1;
+  } catch (err) {
+    return 1;
+  }
+}
+
+// 配置算出来的基准 DIP 尺寸（不经过物理尺寸锚定）。
+function basePetSize() {
   return {
     width: Math.round(BASE_W * config.scale),
     height: Math.round(BASE_H * config.scale)
   };
 }
 
+// 桌宠窗口当前该有的 DIP 尺寸。
+// petPixels 为空时（刚启动、或缩放比例刚被用户改过）直接用配置算出来的基准尺寸。
+function petSize() {
+  const base = basePetSize();
+  if (!petPixels) return base;
+  const k = petScaleFactor();
+  return {
+    width: Math.max(120, Math.round(petPixels.width / k)),
+    height: Math.max(120, Math.round(petPixels.height / k))
+  };
+}
+
+// 把桌宠窗口调到该有的尺寸，并记下这次生效的物理尺寸。
+//
+// ⚠️ 这里必须用 setBounds，不能用 setSize。
+//
+// 桌宠窗口是 resizable:false 的，而 Windows 上 **resizable:false 的窗口
+// 只能用 setSize 变大、不能变小** —— 系统把当前尺寸当成了最小尺寸，
+// setSize(更小) 会被直接忽略。实测（探针 9）：
+//   420x360 → setSize(600x500) 变成 600x500
+//            → setSize(420x360) 仍然停在 600x500（缩不回去！）
+//            → setBounds(420x360) 正常缩回
+//
+// 后果就是：用户把「窗口大小」滑杆调小以后，猫不肯变小；
+// 每调大一次就再也回不去 —— 用户看到的正是「猫会自己逐渐变大」。
+// setBounds 不受这个限制，所以改用它。
+function applyPetSize() {
+  if (!petWindow || petWindow.isDestroyed()) return;
+  const { width, height } = petSize();
+  const [x, y] = petWindow.getPosition();
+  petWindow.setBounds({ x, y, width, height });
+  const k = petScaleFactor();
+  petPixels = { width: Math.round(width * k), height: Math.round(height * k) };
+}
+
 function defaultPosition(width, height) {
   const area = screen.getPrimaryDisplay().workArea;
+  // 取整：缩放不是 100% 时 workArea 可能带小数，
+  // 而窗口坐标只接受整数（见 toInt 的注释）。
   return {
-    x: area.x + area.width - width - 32,
-    y: area.y + area.height - height - 32
+    x: toInt(area.x + area.width - width - 32, 0),
+    y: toInt(area.y + area.height - height - 32, 0)
   };
 }
 
@@ -321,7 +523,12 @@ function isPositionVisible(position, width, height) {
 // 返回安全位置：保存的坐标若已落在所有屏幕之外，就回退到主屏右下角。
 function resolvePosition(width, height) {
   const saved = config.position;
-  if (isPositionVisible(saved, width, height)) return saved;
+  if (isPositionVisible(saved, width, height)) {
+    // ⚠️ 保存下来的坐标也可能是小数 —— 老版本在缩放不是 100% 的屏幕上
+    //   拖出来的位置会带小数。直接交给 BrowserWindow 构造函数会在启动时炸，
+    //   所以这里统一收敛成整数。
+    return { x: toInt(saved.x, 0), y: toInt(saved.y, 0) };
+  }
   if (saved) {
     debugLog('saved position off-screen, fallback to default: ' + JSON.stringify(saved));
     // 清掉脏坐标，避免下次启动重复告警、也避免外接屏再次接入时窗口跳回副屏。
@@ -334,10 +541,11 @@ function resolvePosition(width, height) {
 // 把跑出屏幕的桌宠拉回可见区域，并把新位置写回配置，避免下次启动再次越界。
 function ensurePetVisible() {
   if (!petWindow || petWindow.isDestroyed()) return;
-  const { width, height } = petSize();
-  const [x, y] = petWindow.getPosition();
-  if (isPositionVisible({ x, y }, width, height)) return;
-  const pos = defaultPosition(width, height);
+  // 用窗口**当前的实际尺寸**判断是否越界 —— 系统缩放变了以后，
+  // 配置算出来的 DIP 尺寸和窗口实际占的 DIP 可能已经对不上了。
+  const b = petWindow.getBounds();
+  if (isPositionVisible({ x: b.x, y: b.y }, b.width, b.height)) return;
+  const pos = defaultPosition(b.width, b.height);
   petWindow.setPosition(pos.x, pos.y);
   config.position = pos;
   scheduleSave();
@@ -396,7 +604,10 @@ function quitApp() {
 }
 
 function createPetWindow() {
-  const { width, height } = petSize();
+  // 这里用**基准**尺寸：窗口还没建出来，锚定物理尺寸所需的
+  // 「所在显示器的缩放比例」还问不出来。窗口建好之后 applyPetSize()
+  // 会按真实比例校正一次。
+  const { width, height } = basePetSize();
   const position = resolvePosition(width, height);
 
   petWindow = new BrowserWindow({
@@ -426,6 +637,10 @@ function createPetWindow() {
 
   petWindow.setOpacity(config.opacity);
   petWindow.loadFile('pet.html');
+
+  // 记下这次生效的物理尺寸：以后系统缩放变了，就按它换算回去，
+  // 保证猫在屏幕上的实际大小不跟着变（见 petPixels 的注释）。
+  applyPetSize();
 
   petWindow.once('ready-to-show', () => {
     petWindow.show();
@@ -732,7 +947,16 @@ function applyConfig(next) {
   const wasInputHook = config.globalKeys || config.globalMouse;
   const wasKeys = config.globalKeys;
   const wasMouse = config.globalMouse;
-  config = { ...config, ...next };
+  const wasScale = config.scale;
+  // 先过一遍护栏：设置页传来的字段类型不一定靠谱
+  // （旧版本留下的字符串透明度、带小数的位置），直接合并的话
+  // 后面 setOpacity() / setPosition() 会当场抛 gin 的 TypeError。
+  // next 不是对象（渲染进程发坏了）就当什么都没改。
+  const patch = (next && typeof next === 'object' && !Array.isArray(next)) ? next : {};
+  config = sanitizeConfig({ ...config, ...patch });
+  // 用户改了缩放比例 → 之前记的物理尺寸作废，
+  // 新的比例按当前屏幕的缩放重新落地（否则改一次大小时会叠加旧尺寸）。
+  if (config.scale !== wasScale) petPixels = null;
   saveConfig();
   applyLocalizedUI();
 
@@ -753,8 +977,7 @@ function applyConfig(next) {
   applyLoginItem();
 
   if (petWindow && !petWindow.isDestroyed()) {
-    const { width, height } = petSize();
-    petWindow.setSize(width, height);
+    applyPetSize();
     petWindow.setAlwaysOnTop(config.alwaysOnTop);
     petWindow.setOpacity(config.opacity);
     petWindow.webContents.send('pet:config', config);
@@ -1371,9 +1594,15 @@ function showContextMenu(screenX, screenY, isRetry) {
   const w = 190;
 
   // 定位：优先用鼠标的屏幕坐标；拿不到就用桌宠窗口的左上角。
+  // ⚠️ 必须取整 —— 缩放不是 100% 时 getCursorScreenPoint() 会返回小数，
+  //   而 BrowserWindow 的 x/y 只接受整数，传小数会抛
+  //   "Error processing argument at index N, conversion failure"。
   const cursor = (Number.isFinite(screenX) && Number.isFinite(screenY))
     ? { x: Math.round(screenX), y: Math.round(screenY) }
-    : screen.getCursorScreenPoint();
+    : (() => {
+      const p = screen.getCursorScreenPoint();
+      return { x: Math.round(p.x), y: Math.round(p.y) };
+    })();
 
   // ⚠️ 必须夹在**当前显示器**的工作区里 —— 多显示器时，
   //   在副屏边缘点右键，菜单会有一半跑到屏幕外面去。
@@ -1385,6 +1614,11 @@ function showContextMenu(screenX, screenY, isRetry) {
   if (x + w > area.x + area.width) x = Math.max(area.x, cursor.x - w);
   // 下边放不下就往上挪。
   if (y + h > area.y + area.height) y = Math.max(area.y, area.y + area.height - h);
+  // ⚠️ 最后再取一次整 —— workArea 的坐标在分数缩放的显示器上也可能带小数，
+  //   而 BrowserWindow 的 x/y 只接受整数，传小数会抛
+  //   「Error processing argument at index N, conversion failure」。
+  x = toInt(x, 0);
+  y = toInt(y, 0);
 
   const win = new BrowserWindow({
     x, y,
@@ -1652,12 +1886,46 @@ function watchPowerEvents() {
 }
 
 // ---------- IPC ----------
-ipcMain.on('pet:get-config', event => { event.returnValue = config; });
-ipcMain.on('settings:get-config', event => { event.returnValue = config; });
+//
+// ⚠️ 所有 IPC 监听器都走 onIpc() 包一层，不要直接 ipcMain.on()。
+//
+// 原因：ipcMain 的监听器抛出的异常会一路冒到 Electron 的未捕获异常处理器
+// → 弹「A JavaScript error occurred in the main process」错误框 → 主进程结束。
+// 渲染进程送来的参数我们控制不了（版本不一致、页面 bug、坐标带小数……），
+// 一个坏参数不该让整只猫消失。onIpc() 把异常吃掉并记进诊断日志。
+//
+// fallback 是同步通道（sendSync）出错时返回的兜底值。
+//
+// ⚠️ 同步通道的兜底值**不是可选项**：
+//   渲染进程用 sendSync 拉数据时，如果主进程这边一个值都没设，
+//   sendSync 就永远不返回 —— 渲染进程的 UI 线程直接卡死，
+//   比弹错误框还糟（用户看到的是「整个界面没反应」）。
+//   实测：处理体抛异常且没有 returnValue 时，sendSync 挂死；
+//   给了兜底值后立刻正常返回。
+//   所以这里**总是**给 event.returnValue 赋值，兜底值缺省用 null ——
+//   对异步通道（ipcRenderer.send）来说 returnValue 根本没人读，设了也无害。
+function onIpc(channel, handler, fallback) {
+  ipcMain.on(channel, (event, ...args) => {
+    try {
+      handler(event, ...args);
+    } catch (err) {
+      debugLog('ipc error [' + channel + ']: ' + (err && err.stack || err));
+      try {
+        // 处理体可能已经算出了结果才在后面抛的 —— 那就别覆盖它。
+        if (event.returnValue === undefined) {
+          event.returnValue = fallback === undefined ? null : fallback;
+        }
+      } catch (_) { /* 忽略 */ }
+    }
+  });
+}
 
-ipcMain.on('pet:open-settings', createSettingsWindow);
-ipcMain.on('pet:open-demo', showDemoWindow);
-ipcMain.on('pet:show-context-menu', (_event, x, y) => popupPetContextMenu(x, y));
+onIpc('pet:get-config', event => { event.returnValue = config; }, {});
+onIpc('settings:get-config', event => { event.returnValue = config; }, {});
+
+onIpc('pet:open-settings', createSettingsWindow);
+onIpc('pet:open-demo', showDemoWindow);
+onIpc('pet:show-context-menu', (_event, x, y) => popupPetContextMenu(x, y));
 
 // 自绘菜单**主动拉**菜单项。
 //
@@ -1666,25 +1934,17 @@ ipcMain.on('pet:show-context-menu', (_event, x, y) => popupPetContextMenu(x, y))
 //   那时渲染进程的 preload 可能还没注册上 on('menu:items')，
 //   IPC 被静默丢弃 → 菜单弹出来是**一片空白**（用户以为程序卡了）。
 //   渲染进程主动同步拉取就没有这个竞态。
-ipcMain.on('menu:get-items', event => {
-  try {
-    event.returnValue = contextMenuItems();
-  } catch (err) {
-    event.returnValue = [];
-  }
-});
+onIpc('menu:get-items', event => {
+  event.returnValue = contextMenuItems();
+}, []);
 
 // 渲染进程异步再要一次菜单项（同步拉取失败时的补救）。
-ipcMain.on('menu:request-items', event => {
-  try {
-    event.sender.send('menu:items', contextMenuItems());
-  } catch (err) {
-    debugLog('menu:request-items failed: ' + err.message);
-  }
+onIpc('menu:request-items', event => {
+  event.sender.send('menu:items', contextMenuItems());
 });
 
 // 自绘菜单点了某一项。
-ipcMain.on('menu:pick', (_event, action) => {
+onIpc('menu:pick', (_event, action) => {
   // 先关菜单再执行动作 —— 有些动作（比如「退出」）会结束整个应用，
   // 菜单留着会变成一个关不掉的孤儿窗口。
   closeContextMenu();
@@ -1692,9 +1952,9 @@ ipcMain.on('menu:pick', (_event, action) => {
 });
 
 // 自绘菜单请求关闭（Esc、点外面、点空白处）。
-ipcMain.on('menu:close', () => closeContextMenu());
-ipcMain.on('pet:quit', () => { isQuitting = true; app.quit(); });
-ipcMain.on('pet:renderer-log', (_event, message) => {
+onIpc('menu:close', () => closeContextMenu());
+onIpc('pet:quit', () => { isQuitting = true; app.quit(); });
+onIpc('pet:renderer-log', (_event, message) => {
   if (config.debug) debugLog('renderer: ' + message);
 });
 
@@ -1704,7 +1964,7 @@ ipcMain.on('pet:renderer-log', (_event, message) => {
 // 因为窗口一旦穿透就收不到自己的 mousemove，渲染进程无法自救。
 // 这里的 IPC 只用于渲染进程表达「我现在需要接收鼠标」的意图
 // （比如用户点了设置、或者正在拖动），主进程裁决后仍以光标实际位置为准。
-ipcMain.on('pet:ignore-mouse', (_event, ignore) => {
+onIpc('pet:ignore-mouse', (_event, ignore) => {
   if (!petWindow || petWindow.isDestroyed()) return;
   if (!ignore) {
     // 明确要求接收鼠标 —— 直接关闭穿透。
@@ -1715,21 +1975,31 @@ ipcMain.on('pet:ignore-mouse', (_event, ignore) => {
   updateIgnoreFromCursor();
 });
 
-ipcMain.on('pet:drag', (_event, dx, dy) => {
+onIpc('pet:drag', (_event, dx, dy) => {
   if (!petWindow || petWindow.isDestroyed()) return;
   // 主进程再兜一层：设置里关掉「允许拖动」后，即使渲染进程漏发也会被拦下。
   if (!config.allowDrag) return;
   // 拖动期间标记一下，让 focus 处理器知道「现在不能抢焦点」。
   petDragging = true;
   const [x, y] = petWindow.getPosition();
-  const next = { x: x + dx, y: y + dy };
+  // ⚠️ 这一段就是「别的用户跑打包版就崩」的现场（见 toInt 的注释）：
+  //   缩放不是 100% 时 getPosition() 会返回带小数的坐标，
+  //   next.y 一旦是小数，setPosition 就会抛
+  //   「Error processing argument at index 1, conversion failure from」。
+  //   增量本身也要先收敛：渲染进程送来的东西一律按不可信处理。
+  const stepX = toInt(dx, 0);
+  const stepY = toInt(dy, 0);
+  if (!stepX && !stepY) return;
+  const curX = toInt(x, 0);
+  const curY = toInt(y, 0);
+  const next = { x: toInt(curX + stepX, curX), y: toInt(curY + stepY, curY) };
   petWindow.setPosition(next.x, next.y);
   config.position = next;
   scheduleSave();
 });
 
 // 拖动开始 / 结束通知。
-ipcMain.on('pet:dragging', (_event, on) => {
+onIpc('pet:dragging', (_event, on) => {
   petDragging = !!on;
   // 拖动开始时立刻关闭穿透，不要等下一轮轮询 ——
 // 否则从「按下」到「窗口开始跟随」之间有最多 16ms 的空窗，
@@ -1738,11 +2008,11 @@ ipcMain.on('pet:dragging', (_event, on) => {
   else updateIgnoreFromCursor();
 });
 
-ipcMain.on('settings:set-language', (_event, language) => {
+onIpc('settings:set-language', (_event, language) => {
   applyConfig({ language: language === 'en' ? 'en' : 'zh' });
 });
 
-ipcMain.on('settings:save-config', (_event, next) => {
+onIpc('settings:save-config', (_event, next) => {
   applyConfig(next);
   if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.close();
 });
@@ -1759,7 +2029,7 @@ ipcMain.on('settings:save-config', (_event, next) => {
 //   又有副作用（比如桌宠突然闪一下）。
 //
 // 所以这里只做「合并配置 + 存盘」这一件事，跟编辑器那个通道一个思路。
-ipcMain.on('settings:save-ui-theme', (_event, theme) => {
+onIpc('settings:save-ui-theme', (_event, theme) => {
   const value = theme === 'doodle' ? 'doodle' : 'glass';
   if (config.skinUi === value) return;   // 没变就别写盘
   config = { ...config, skinUi: value };
@@ -1794,7 +2064,7 @@ function broadcastUiTheme(theme) {
 //   重测保密模式、改开机自启。编辑器换个界面风格跟这些**毫无关系**，
 //   全都跑一遍既浪费又有副作用（比如桌宠突然闪一下）。
 //   所以这里只做「合并配置 + 存盘」这一件事。
-ipcMain.on('skin-editor:save-config', (_event, next) => {
+onIpc('skin-editor:save-config', (_event, next) => {
   if (!next || typeof next !== 'object') return;
   // 只认编辑器自己关心的那个键 —— 别的一概不碰。
   const theme = next.skinUi === 'doodle' ? 'doodle' : 'glass';
@@ -1805,11 +2075,11 @@ ipcMain.on('skin-editor:save-config', (_event, next) => {
   broadcastUiTheme(theme);
 });
 
-ipcMain.on('settings:close', () => {
+onIpc('settings:close', () => {
   if (settingsWindow && !settingsWindow.isDestroyed()) settingsWindow.close();
 });
 
-ipcMain.on('settings:reset-position', () => {
+onIpc('settings:reset-position', () => {
   config.position = null;
   saveConfig();
   if (petWindow && !petWindow.isDestroyed()) {
@@ -1820,9 +2090,9 @@ ipcMain.on('settings:reset-position', () => {
 });
 
 // 全局输入后端状态。设置页用它显示「全局跟随为什么没反应」。
-ipcMain.on('input:get-status', event => {
+onIpc('input:get-status', event => {
   event.returnValue = inputBackend.status();
-});
+}, {});
 
 // 打开系统的权限设置页。
 //
@@ -1832,7 +2102,7 @@ ipcMain.on('input:get-status', event => {
 // macOS 13+ 用 x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility，
 // 12 及更早用 Privacy_Accessibility（同一个 pane）。
 // Linux 上没有对应机制（X11 不需要授权），所以不处理。
-ipcMain.on('input:open-permission-settings', () => {
+onIpc('input:open-permission-settings', () => {
   if (process.platform !== 'darwin') return;
   try {
     shell.openExternal(
@@ -1853,16 +2123,17 @@ ipcMain.on('input:open-permission-settings', () => {
 // 所以桌宠需要时自己来取。
 
 // 读全部用户皮肤（原始 JSON 文本，交给存储层解析）。
-ipcMain.on('skin:get-skins', event => { event.returnValue = readSkins(); });
+// fallback 是空串 —— 读不到时渲染进程会当成「没有皮肤」处理，而不是报错。
+onIpc('skin:get-skins', event => { event.returnValue = readSkins(); }, '');
 
 // 保存整份皮肤列表。
-ipcMain.on('skin:save-skins', (_event, text) => { writeSkins(text); });
+onIpc('skin:save-skins', (_event, text) => { writeSkins(text); });
 
 // 穿上某件用户皮肤。
 //
 // 「保存并穿上」是编辑器的主要动作，所以这两件事在主进程里连成一步：
 // 配置记住是哪一件，桌宠立刻换上。
-ipcMain.on('skin:wear', (_event, id) => {
+onIpc('skin:wear', (_event, id) => {
   if (!id) return;
   config.skinId = String(id);
   saveConfig();
@@ -1872,7 +2143,8 @@ ipcMain.on('skin:wear', (_event, id) => {
 });
 
 // 桌宠窗口问主进程要当前穿着的皮肤对象。
-ipcMain.on('pet:get-skin', event => {
+// fallback 是 null —— 拿不到时渲染进程就当「没穿自定义皮肤」。
+onIpc('pet:get-skin', event => {
   const id = config.skinId || '';
   if (!id) { event.returnValue = null; return; }
   try {
@@ -1882,10 +2154,10 @@ ipcMain.on('pet:get-skin', event => {
   } catch (_) {
     event.returnValue = null;
   }
-});
+}, null);
 
 // 删掉一件皮肤后，如果穿的就是它，就退回内建皮肤。
-ipcMain.on('skin:removed', (_event, id) => {
+onIpc('skin:removed', (_event, id) => {
   if (config.skinId !== id) return;
   config.skinId = '';
   saveConfig();
@@ -1895,7 +2167,7 @@ ipcMain.on('skin:removed', (_event, id) => {
 });
 
 // 从设置页打开编辑器。
-ipcMain.on('skin:open-editor', (_event, baseId) => {
+onIpc('skin:open-editor', (_event, baseId) => {
   createSkinEditorWindow(baseId || '');
 });
 
@@ -1903,12 +2175,12 @@ ipcMain.on('skin:open-editor', (_event, baseId) => {
 //
 // 「取消」和「保存并穿上」都走这条路。原来编辑器发的是 'settings:close'，
 // 而那个通道关的是**设置窗口** —— 于是点「取消」毫无反应，编辑器还开着。
-ipcMain.on('skin-editor:close', () => {
+onIpc('skin-editor:close', () => {
   if (skinEditorWindow && !skinEditorWindow.isDestroyed()) skinEditorWindow.close();
 });
 
 // 皮肤列表变了 —— 让设置页刷新它的下拉框。
-ipcMain.on('skin:changed', () => {
+onIpc('skin:changed', () => {
   if (settingsWindow && !settingsWindow.isDestroyed()) {
     settingsWindow.webContents.send('settings:skins-changed');
   }
@@ -1920,6 +2192,10 @@ function watchDisplayChanges() {
   const events = ['display-added', 'display-removed', 'display-metrics-changed'];
   events.forEach(name => screen.on(name, () => {
     debugLog('display event: ' + name);
+    // 系统缩放/分辨率变了 —— 窗口的 DIP 尺寸不变的话，猫在屏幕上的
+    // 实际大小就跟着变了（用户的观感是「猫自己变大了」）。
+    // 这里按新的缩放比例把窗口换算回去，把猫的物理尺寸钉住。
+    applyPetSize();
     ensurePetVisible();
   }));
 }

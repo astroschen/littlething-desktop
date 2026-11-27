@@ -57,7 +57,11 @@ const state = {
   lastError: '',      // 最近一次错误信息
   degraded: false,    // 是否处于「降级但仍可用」状态
   wantKeyboard: false,// 当前订阅了键盘事件
-  wantMouse: false   // 当前订阅了鼠标事件
+  wantMouse: false,   // 当前订阅了鼠标事件
+  // 后端收到的事件计数。用来分辨两种完全不同的故障：
+  //   「钩子根本没起来」→ 计数一直是 0
+  //   「钩子起来了但某个键型对不上」→ 鼠标在涨、键盘不涨
+  stats: { key: 0, mouse: 0 }
 };
 
 // ---------- 平台能力探测 ----------
@@ -182,6 +186,19 @@ function start(hookDir, emit, opts) {
   }
 
   let lastErr = '';
+  // 包一层计数：所有后端（Windows 的 koffi、macOS/Linux 的 uiohook）
+  // 的事件都从这里过，计数才有可比性。
+  // 用途是分辨两种完全不同的故障：
+  //   「钩子根本没起来 / 收不到任何事件」→ 两个计数都是 0
+  //   「事件到了但键盘那一路对不上」→ 鼠标在涨、键盘不涨
+  const countedEmit = (payload) => {
+    if (!payload || !payload.type) return emit(payload);
+    if (payload.type === 'down' || payload.type === 'up') state.stats.key++;
+    else if (payload.type === 'mousedown' || payload.type === 'mouseup' ||
+             payload.type === 'mousemove') state.stats.mouse++;
+    return emit(payload);
+  };
+
   for (const name of cands) {
     let backend;
     try {
@@ -197,7 +214,7 @@ function start(hookDir, emit, opts) {
 
     let res;
     try {
-      res = backend.start({ emit, hookDir, wantKeyboard, wantMouse });
+      res = backend.start({ emit: countedEmit, hookDir, wantKeyboard, wantMouse });
     } catch (err) {
       lastErr = (err && err.message) || String(err);
       continue;
@@ -233,6 +250,7 @@ function stop() {
   state.degraded = false;
   state.wantKeyboard = false;
   state.wantMouse = false;
+  state.stats = { key: 0, mouse: 0 };
   if (b) {
     try { b.stop(); } catch (_) { /* 已停止 */ }
   }
@@ -267,6 +285,10 @@ function status() {
     degraded: state.degraded,
     wantKeyboard: state.wantKeyboard,
     wantMouse: state.wantMouse,
+    // 后端收到的事件计数（key=键盘，mouse=鼠标）。
+    // 两个都是 0 → 钩子没起来或压根没授权；
+    // 只有 mouse 在涨 → 键鼠走了同一条路，问题在键盘那一路。
+    stats: { key: state.stats.key, mouse: state.stats.mouse },
     capability: caps
   };
 }
