@@ -15,7 +15,13 @@
     // 每次都叠加随机扰动，来不及衰减就又叠加下一次）。
     // 那个效果本身挺可爱，所以保留下来做成开关，但默认不开 ——
     // 开箱第一眼不该是「鼠标在抖」。
-    mouseJitter: false, mouseJitterAmount: 0.5
+    mouseJitter: false, mouseJitterAmount: 0.5,
+    // 「耳机模式」：默认开着。戴上耳机时小猫戴上耳机并从耳边飘音符。
+    //
+    // ⚠️ Windows 上只能判断「有没有耳机」和「耳机是不是默认输出设备」，
+    //   拿不到「正在放什么歌」—— 所以飘的是音符，不是歌词。
+    //   歌词那条路要系统级的 now-playing 元数据，目前只有 macOS 有。
+    headphoneMode: true
   };
   let config = { ...DEFAULT, ...(api.getConfig() || {}) };
 
@@ -433,4 +439,71 @@
     if (!onDragArea(e.clientX, e.clientY)) return;
     api.showContextMenu(e.screenX, e.screenY);
   });
+
+  // ---------- 耳机模式 ----------
+  // 戴着耳机时，小猫戴上耳机、旁边飘出音符 ♪♫♬。
+  //
+  // ⚠️ 状态是**主进程推过来的**，不是这里自己查的：
+  //   查默认输出设备要走 COM（IMMDeviceEnumerator），那是主进程的事。
+  //   渲染进程只负责把它变成「戴不戴 / 飘不飘」的表现。
+  //
+  // ⚠️ 音符从猫的**耳机位置**飘出来，所以要问 cat 要一下耳机在画布上的坐标
+  //   （cat.headphonePos）。左右交替，看起来像是从两边轮流冒出来的。
+  (() => {
+    // 主进程可能还没查到设备（比如 COM 初始化失败），
+    // 所以这里要能接受「什么都没有」的状态。
+    let hpState = (api.getHeadphoneState && api.getHeadphoneState()) || {
+      connected: false, audioActive: false, playing: false
+    };
+    let noteTimer = 0;
+    let noteSide = 1;
+
+    function spawnNote() {
+      if (!cat || !cat.headphonePos || reduceMotion) return;
+      const pos = cat.headphonePos(noteSide);
+      const el = document.createElement('div');
+      el.className = 'note-float';
+      const notes = ['♪', '♫', '♬'];
+      el.textContent = notes[Math.floor(Math.random() * notes.length)];
+      const stageW = stage.clientWidth || 420;
+      const jitterX = (Math.random() - 0.5) * 10;
+      const x = Math.max(24, Math.min(stageW - 24, Math.round(pos.x + jitterX)));
+      const y = Math.max(44, Math.round(pos.y - 4));
+      el.style.left = `${x}px`;
+      el.style.top = `${y}px`;
+      el.style.setProperty('--dx', `${noteSide * (12 + Math.round(Math.random() * 14))}px`);
+      stage.appendChild(el);
+      setTimeout(() => el.remove(), 2150);
+      noteSide = -noteSide;
+    }
+
+    function refreshHeadphones() {
+      const enabled = config.headphoneMode !== false;
+      const worn = !!(enabled && hpState.connected);
+      // 「在放东西」：macOS 能拿到真实的播放状态；
+      // Windows 上拿不到，只要耳机在当默认输出设备就算「有声音在放」。
+      const playing = !!(worn && (hpState.playing || hpState.audioActive));
+      if (cat.setHeadphones) cat.setHeadphones(worn, playing);
+
+      if (playing && !noteTimer) {
+        noteTimer = setInterval(spawnNote, 1050);
+      } else if (!playing && noteTimer) {
+        clearInterval(noteTimer);
+        noteTimer = 0;
+      }
+    }
+
+    if (api.onHeadphoneState) {
+      api.onHeadphoneState(next => {
+        if (!next) return;
+        hpState = next;
+        refreshHeadphones();
+      });
+    }
+    api.onConfig(next => {
+      config = { ...config, ...next };
+      refreshHeadphones();
+    });
+    refreshHeadphones();
+  })();
 })();

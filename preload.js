@@ -16,6 +16,12 @@ contextBridge.exposeInMainWorld('petAPI', {
   onGlobalMouse: callback => ipcRenderer.on('pet:global-mouse', (_event, payload) => callback(payload)),
   // 保密模式：主进程探测到「用户正在密码框输入」时推送 { isPassword, cursorX }
   onSecretState: callback => ipcRenderer.on('pet:secret-state', (_event, payload) => callback(payload)),
+  // 耳机状态：主进程问系统「默认输出设备是不是耳机」的结果。
+  //
+  // 返回 { connected, audioActive, playing, deviceName, formFactor, error }。
+  // ⚠️ Windows 上 playing 永远是 false —— 系统没有 now-playing 元数据接口。
+  getHeadphoneState: () => ipcRenderer.sendSync('pet:get-headphone-state'),
+  onHeadphoneState: callback => ipcRenderer.on('pet:headphone-state', (_event, payload) => callback(payload)),
   openSettings: () => ipcRenderer.send('pet:open-settings'),
   // 单独存「界面风格」。
   //

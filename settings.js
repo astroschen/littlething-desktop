@@ -47,6 +47,7 @@
       autoLaunch: '开机自动启动',
       allowDrag: '允许拖动猫咪',
       secretMode: '保密模式（输密码时扭头不看）',
+      headphoneMode: '耳机模式（戴上耳机时戴耳机、飘音符）',
       debug: '启用诊断日志',
       save: '保存',
       cancel: '取消',
@@ -108,6 +109,7 @@
       autoLaunch: 'Launch at login',
       allowDrag: 'Allow dragging the cat',
       secretMode: 'Secret mode (look away while typing passwords)',
+      headphoneMode: 'Headphone mode (wear headphones and float notes)',
       debug: 'Enable diagnostic log',
       save: 'Save',
       cancel: 'Cancel',
@@ -402,7 +404,7 @@
   renderCoats();
   renderMySkins();
   $('coat').value = cfg.skinId || cfg.coat;
-  ['showKeyboard', 'showMouse', 'leftMouse', 'autoDemo', 'globalKeys', 'globalMouse', 'mouseJitter', 'alwaysOnTop', 'autoLaunch', 'allowDrag', 'secretMode', 'debug']
+  ['showKeyboard', 'showMouse', 'leftMouse', 'autoDemo', 'globalKeys', 'globalMouse', 'mouseJitter', 'alwaysOnTop', 'autoLaunch', 'allowDrag', 'secretMode', 'headphoneMode', 'debug']
     .forEach(id => { $(id).checked = !!cfg[id]; });
 
   const ranges = ['sleepMinutes', 'scale', 'opacity'];
@@ -485,7 +487,7 @@
     const isCustom = !!skinStore.find(picked);
     next.skinId = isCustom ? picked : '';
     next.coat = isCustom ? 'jiba' : picked;
-    ['showKeyboard', 'showMouse', 'leftMouse', 'autoDemo', 'globalKeys', 'globalMouse', 'mouseJitter', 'alwaysOnTop', 'autoLaunch', 'allowDrag', 'secretMode', 'debug']
+    ['showKeyboard', 'showMouse', 'leftMouse', 'autoDemo', 'globalKeys', 'globalMouse', 'mouseJitter', 'alwaysOnTop', 'autoLaunch', 'allowDrag', 'secretMode', 'headphoneMode', 'debug']
       .forEach(id => { next[id] = $(id).checked; });
     ranges.forEach(id => { next[id] = Number($(id).value); });
     // 躁动强度：滑杆 0..100 → 配置 0..1。

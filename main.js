@@ -127,6 +127,12 @@ const DEFAULTS = {
   autoLaunch: false,
   allowDrag: true,
   secretMode: true,
+  // 「耳机模式」：戴上耳机时小猫戴上耳机、旁边飘音符。
+  //
+  // ⚠️ 目前只有 Windows 实现了检测（input/win32-audio.js 走 COM 问系统
+  //   「当前默认输出设备是不是耳机」）。macOS / Linux 上这个开关没有效果，
+  //   设了也只是记下来而已 —— 别在其他平台上假装它生效了。
+  headphoneMode: true,
   debug: false,
   position: null,
   // 界面风格：'glass'（苹果液态玻璃）/ 'doodle'（卡通涂鸦）。
@@ -258,6 +264,7 @@ function sanitizeConfig(raw) {
   if ('globalMouse' in out) out.globalMouse = toBool(out.globalMouse, true);
   if ('allowDrag' in out) out.allowDrag = toBool(out.allowDrag, true);
   if ('secretMode' in out) out.secretMode = toBool(out.secretMode, true);
+  if ('headphoneMode' in out) out.headphoneMode = toBool(out.headphoneMode, true);
   if ('autoLaunch' in out) out.autoLaunch = toBool(out.autoLaunch, false);
   if ('debug' in out) out.debug = toBool(out.debug, false);
   if ('mouseJitter' in out) out.mouseJitter = toBool(out.mouseJitter, false);
@@ -974,6 +981,11 @@ function applyConfig(next) {
   if (config.secretMode) startSecretProbe();
   else stopSecretProbe();
 
+  // 耳机模式同理：开着就探测，关掉就停 —— 探测要走 COM，属于系统级读取，
+  // 用户关掉后不该还在后台问系统要设备名。
+  if (config.headphoneMode) startHeadphoneProbe();
+  else stopHeadphoneProbe();
+
   applyLoginItem();
 
   if (petWindow && !petWindow.isDestroyed()) {
@@ -1235,6 +1247,99 @@ function sendSecretState(isPassword, cursorX) {
     dir = cursorX >= centerX ? 1 : -1;
   } catch (_) { dir = 1; }
   petWindow.webContents.send('pet:secret-state', { isPassword, dir });
+}
+
+// ---------- 耳机探测 ----------
+//
+// 问系统「当前默认输出设备是不是耳机」，然后把答案推给渲染进程。
+//
+// ⚠️ 为什么必须放在主进程：
+//   查默认音频设备要走 COM（IMMDeviceEnumerator），那是 Node 的活，
+//   渲染进程里没有这个能力。而且探测本身是同步的（几十毫秒），
+//   放渲染进程会卡住 UI 线程。
+//
+// ⚠️ Windows 上拿不到「正在放什么歌」：
+//   Windows 没有 now-playing 元数据接口（macOS 有），所以 playing 永远是 false。
+//   我们只能回答「耳机在不在」，飘的是音符而不是歌词。
+//
+// ⚠️ 不是所有设备都上报 FormFactor：
+//   板载声卡、HDMI 显示器这类设备根本不提供 PKEY_AudioEndpoint_FormFactor，
+//   读出来是 VT_EMPTY。所以判定要靠「FormFactor 或者名字像耳机」两条路。
+let headphoneTimer = 0;
+let _audioProbe = null;   // null = 还没试过；false = 试过但不可用
+let headphoneState = {
+  connected: false, audioActive: false, playing: false,
+  deviceName: '', formFactor: null, error: ''
+};
+
+function audioProbe() {
+  if (_audioProbe === null) {
+    try {
+      // 只在 Windows 上加载 —— 别的平台的模块里全是 Windows 专用的
+      // COM 调用，硬加载只会直接抛异常。
+      _audioProbe = process.platform === 'win32'
+        ? require(path.join(__dirname, 'input', 'win32-audio.js'))
+        : false;
+    } catch (err) {
+      debugLog('audio probe load failed: ' + (err && err.message || err));
+      _audioProbe = false;
+    }
+  }
+  return _audioProbe || null;
+}
+
+function sendHeadphoneState(state) {
+  if (!petWindow || petWindow.isDestroyed()) return;
+  petWindow.webContents.send('pet:headphone-state', state);
+}
+
+function startHeadphoneProbe() {
+  if (headphoneTimer) return;
+  if (process.platform !== 'win32') return;
+  const probe = audioProbe();
+  if (!probe || !probe.available()) {
+    debugLog('headphone probe unavailable');
+    return;
+  }
+  debugLog('headphone probe started');
+  const tick = () => {
+    if (!config.headphoneMode) { stopHeadphoneProbe(); return; }
+    let next = null;
+    try { next = probe.detectHeadphone(); } catch (_) { next = null; }
+    if (!next) return;
+    const state = {
+      // 有耳机在当默认输出设备 = 有声音在放。
+      // Windows 上没有真正的「正在播放」信号，只能这么近似。
+      connected: !!next.connected,
+      audioActive: !!next.connected,
+      playing: false,
+      deviceName: next.deviceName || '',
+      formFactor: next.formFactor === undefined ? null : next.formFactor,
+      error: next.error || ''
+    };
+    const changed = state.connected !== headphoneState.connected ||
+      state.deviceName !== headphoneState.deviceName ||
+      state.error !== headphoneState.error;
+    headphoneState = state;
+    if (changed) {
+      debugLog('headphone state: connected=' + state.connected +
+        ' device=' + state.deviceName + (state.error ? ' error=' + state.error : ''));
+      sendHeadphoneState(state);
+    }
+  };
+  tick();
+  headphoneTimer = setInterval(tick, 1500);
+}
+
+function stopHeadphoneProbe() {
+  if (headphoneTimer) {
+    clearInterval(headphoneTimer);
+    headphoneTimer = 0;
+  }
+  if (headphoneState.connected || headphoneState.deviceName) {
+    headphoneState = { connected: false, audioActive: false, playing: false, deviceName: '', formFactor: null, error: '' };
+    sendHeadphoneState(headphoneState);
+  }
 }
 
 function applyLocalizedUI() {
@@ -1505,6 +1610,7 @@ const menuState = {
   win: null,
   ready: false,        // 菜单是不是已经显示出来了
   settled: false,      // 已经 show 过（不管走的哪条路）
+  shownAt: 0,          // 菜单**真正显示出来**的时刻（ms）—— 用来躲开刚弹出时的焦点抖动
   timer: null,         // ready-to-show 超时定时器
   retries: 0,          // 已经重试过几次
   fallbackShown: false // 原生菜单兜底是不是已经弹过了
@@ -1525,6 +1631,8 @@ function markMenuSettled(win) {
   if (!win || win.isDestroyed()) return;
   menuState.settled = true;
   menuState.ready = true;
+  // 记下「真正显示出来的时刻」—— blur 处理器要用它躲开刚弹出时的焦点抖动。
+  menuState.shownAt = Date.now();
 }
 
 // 原生菜单兜底。
@@ -1766,6 +1874,13 @@ function showContextMenu(screenX, screenY, isRetry) {
   //   所以只在菜单真正显示过之后才理会 blur。
   win.on('blur', () => {
     if (!menuState.settled) return;
+    // ⚠️ 刚显示出来的那一瞬间，焦点会来回抖 ——
+    //   系统切换前台窗口时会先给这个窗口发一次 blur，再把焦点收回去。
+    //   不加这道闸门，菜单会「刚弹出就自己关了」。
+    //
+    //   只在**真的显示过**（settled）之后才理会 blur，
+    //   并且再等一小段时间 —— 覆盖「显示之后紧接着的那次抖动」。
+    if (Date.now() - menuState.shownAt < 400) return;
     closeContextMenu();
   });
 
@@ -1922,6 +2037,13 @@ function onIpc(channel, handler, fallback) {
 
 onIpc('pet:get-config', event => { event.returnValue = config; }, {});
 onIpc('settings:get-config', event => { event.returnValue = config; }, {});
+
+// 渲染进程一上来就问一次「现在戴耳机了吗」。
+//
+// ⚠️ 同步通道必须给兜底值：没有兜底值时 sendSync 会永远不返回，
+//   渲染进程的 UI 线程直接卡死（见上面 onIpc 的注释）。
+onIpc('pet:get-headphone-state', event => { event.returnValue = headphoneState; },
+  { connected: false, audioActive: false, playing: false, deviceName: '', formFactor: null, error: '' });
 
 onIpc('pet:open-settings', createSettingsWindow);
 onIpc('pet:open-demo', showDemoWindow);
@@ -2261,6 +2383,8 @@ app.whenReady().then(() => {
   initInputHook();
   // 保密模式探测（询问系统焦点控件是不是密码框）
   if (config.secretMode) startSecretProbe();
+  // 耳机探测（询问系统默认输出设备是不是耳机）
+  if (config.headphoneMode) startHeadphoneProbe();
   try {
     createTray();
   } catch (err) {
@@ -2298,6 +2422,7 @@ app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   stopInputHook();
   stopSecretProbe();
+  stopHeadphoneProbe();
   stopIgnorePolling();
   if (_trayPollTimer) { clearInterval(_trayPollTimer); _trayPollTimer = null; }
 });

@@ -1,6 +1,6 @@
 {
   "name": "littlething-cat-desktop",
-  "version": "1.0.2",
+  "version": "1.0.1",
   "description": "小叽 3D 小猫桌面版 - Electron 封装",
   "author": {
     "name": "LittleThing Local",
@@ -42,6 +42,7 @@
     "files": [
       "main.js",
       "input/**/*",
+      "!input/*.test.js",
       "password-probe.js",
       "preload.js",
       "pet.html",

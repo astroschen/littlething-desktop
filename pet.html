@@ -33,6 +33,24 @@
     100% { opacity: 0; transform: translate(1.4em, -2.6em) scale(1); }
   }
   @media (prefers-reduced-motion: reduce) { .zzz span { animation: none; opacity: 1; } }
+
+  /* 耳机模式：戴耳机时有音符从耳边飘出来。
+     --dx 是每次飘的方向和距离，由 pet.js 随机写进来。 */
+  .note-float {
+    position: absolute;
+    pointer-events: none;
+    font: 700 15px ui-rounded, "PingFang SC", sans-serif;
+    color: #ff6b7a;
+    text-shadow: -1px -1px 0 #17171b, 1px -1px 0 #17171b, -1px 1px 0 #17171b, 1px 1px 0 #17171b;
+    z-index: 5;
+    animation: hpNoteFloat 2.1s ease-out forwards;
+  }
+  @keyframes hpNoteFloat {
+    0% { opacity: 0; transform: translate(-50%, -30%) scale(0.5) rotate(-8deg); }
+    15% { opacity: 1; transform: translate(-50%, -70%) scale(1.05) rotate(6deg); }
+    100% { opacity: 0; transform: translate(calc(-50% + var(--dx, 14px)), -54px) scale(0.92) rotate(-6deg); }
+  }
+  @media (prefers-reduced-motion: reduce) { .note-float { animation: none; opacity: 0; } }
 </style>
 </head>
 <body>
