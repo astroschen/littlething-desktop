@@ -1,6 +1,6 @@
 {
   "name": "littlething-cat-desktop",
-  "version": "1.0.1",
+  "version": "1.0.3",
   "description": "小叽 3D 小猫桌面版 - Electron 封装",
   "author": {
     "name": "LittleThing Local",
